@@ -29,12 +29,19 @@ It's a static site with no build step. Any static host works:
 
 These are ports of the firmware's conversion scripts, not reimplementations from the spec:
 
-- **Manga** ports `tools/manga_convert/convert_manga.py` (white-gutter grid panel detection,
-  reading-order topological sort, Gemini panel OCR with the same prompt/model/retry behaviour,
-  and the same binary writers). Given identical input pixels the binary output is
-  **byte-identical** to the Python tool. The Python tool's optional YOLO panel detector is not
-  included (it needs PyTorch); the web tool always uses the grid heuristic, which is the Python
-  tool's own fallback. PDF input also needs the desktop tool.
+- **Manga** ports `tools/manga_convert/convert_manga.py` (AI panel detection, white-gutter grid
+  fallback, reading-order topological sort, Gemini panel OCR with the same prompt/model/retry
+  behaviour, and the same binary writers). Given identical input pixels and the grid detector,
+  the binary output is **byte-identical** to the Python tool. AI panel detection runs the *same*
+  fine-tuned YOLO26 model as the Python tool
+  ([leoxs22/manga-panel-detector-yolo26n](https://huggingface.co/leoxs22/manga-panel-detector-yolo26n),
+  exported to ONNX in `models/`) in-browser via a vendored ONNX Runtime Web — no PyTorch, no
+  server; the ~21 MB (runtime + model) loads lazily on first use and is cached by the browser.
+  Detected boxes match the Python tool's within a pixel or two (float rounding differs across
+  inference backends); post-processing (confidence 0.4, sliver filter, overlap dedupe, reading
+  order) is identical. Untick *AI panel detection* to force the grid heuristic, which is also
+  the automatic fallback wherever WebAssembly or the download fails. PDF input still needs the
+  desktop tool.
 - **Dictionary** ports `tools/dict_convert/convert_jmdict.py` and `scripts/gen_dict_spx.py`
   **byte-identically** (JMdict-simplified JSON and Yomitan zip inputs; MDict `.mdx` needs the
   desktop tool).
@@ -51,8 +58,10 @@ bytes. It needs a checkout of the firmware repo next door (or set `MATCHA_READER
 
 ```bash
 pip install Pillow freetype-py fonttools    # for reference generation
+pip install numpy onnxruntime               # optional: YOLO panel-detection references
 python3 test/gen_references.py             # build fixtures + Python references
 
+npm install onnxruntime-web                # optional: YOLO detection in the Node tests
 node test/node/run.cjs                     # pure-logic byte comparisons (Node ≥ 18)
 
 npm install playwright                     # browser end-to-end (drives the real pages)

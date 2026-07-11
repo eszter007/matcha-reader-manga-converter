@@ -94,6 +94,50 @@ function testManga() {
   check("2x2 grid order", grid[0] === tr && grid[1] === tl && grid[2] === br && grid[3] === bl);
 }
 
+/* ── Manga: YOLO panel detection vs Python reference ──────────── */
+
+async function testMangaYolo() {
+  console.log("manga YOLO panel detection (vs ref_yolo/boxes.json):");
+  const refPath = path.join(FIXTURES, "ref_yolo", "boxes.json");
+  if (!fs.existsSync(refPath)) {
+    console.log("  skip (no ref_yolo fixtures — rerun gen_references.py with numpy + onnxruntime installed)");
+    return;
+  }
+  let ort;
+  try {
+    ort = require("onnxruntime-web");
+  } catch {
+    console.log("  skip (npm install onnxruntime-web)");
+    return;
+  }
+  const yolo = require("../../js/yolo.js");
+  const model = new Uint8Array(fs.readFileSync(path.join(__dirname, "..", "..", "models", "manga_panel_detector_yolo26n.onnx")));
+  const session = await ort.InferenceSession.create(model, { executionProviders: ["wasm"] });
+
+  const pagesDir = path.join(FIXTURES, "manga_pages");
+  const dims = JSON.parse(fs.readFileSync(path.join(pagesDir, "dims.json"), "utf-8"));
+  const ref = JSON.parse(fs.readFileSync(refPath, "utf-8"));
+
+  // Inference backends round floats differently, so unlike the byte-exact
+  // grid comparisons this is tolerance-based: same panels, same reading
+  // order, coordinates within ±2 px.
+  const TOL = 2;
+  for (const name of Object.keys(ref)) {
+    const [w, h] = dims[name];
+    const rgba = new Uint8Array(fs.readFileSync(path.join(pagesDir, name.replace(".png", ".rgba"))));
+    let boxes = await yolo.detectPanelsYolo(session, ort, rgba, w, h);
+    boxes = manga.sortPanelsMangaOrder(boxes);
+    const expected = ref[name];
+    if (boxes.length !== expected.length) {
+      check(`${name} panel count`, false, `got ${boxes.length}, reference ${expected.length}`);
+      continue;
+    }
+    const ok = boxes.every((b, i) => b.every((v, j) => Math.abs(v - expected[i][j]) <= TOL));
+    check(`${name} ${boxes.length} panel(s) within ±${TOL}px`, ok,
+          ok ? "" : `got ${JSON.stringify(boxes)}, reference ${JSON.stringify(expected)}`);
+  }
+}
+
 /* ── Dictionary: vs convert_jmdict.py + gen_dict_spx.py ───────── */
 
 async function testDictYomitan() {
@@ -147,6 +191,7 @@ async function testZipRoundTrip() {
 
 (async () => {
   testManga();
+  await testMangaYolo();
   await testDictYomitan();
   testDictJmdict();
   await testZipRoundTrip();

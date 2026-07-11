@@ -258,6 +258,39 @@ async function epubNativeToc(zip, opf, opfDir, spineMap, pages) {
   return resolved;
 }
 
+/* ── AI panel detection (lazy-loaded ONNX Runtime + YOLO26 model) ── */
+
+const YOLO_MODEL_URL = "models/manga_panel_detector_yolo26n.onnx";
+const ORT_DIR = "js/vendor/ort/";
+let yoloLoadPromise = null; // resolves to {ort, session}; reset to null on failure
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
+
+function loadYoloDetector() {
+  if (!yoloLoadPromise) {
+    yoloLoadPromise = (async () => {
+      if (typeof ort === "undefined") await loadScriptOnce(ORT_DIR + "ort.wasm.min.js");
+      // Must be absolute: ort dynamic-import()s its .mjs loader, and bare
+      // relative specifiers are invalid module specifiers.
+      ort.env.wasm.wasmPaths = new URL(ORT_DIR, location.href).href;
+      const resp = await fetch(YOLO_MODEL_URL);
+      if (!resp.ok) throw new Error(`model download failed (HTTP ${resp.status})`);
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      const session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
+      return { ort, session };
+    })().catch((e) => { yoloLoadPromise = null; throw e; });
+  }
+  return yoloLoadPromise;
+}
+
 /* ── Conversion pipeline ──────────────────────────────────────── */
 
 const mangaState = { running: false, cancelled: false };
@@ -279,6 +312,7 @@ async function runMangaConversion() {
   }
   saveSetting("gemini-key", apiKey);
   saveSetting("gemini-model", model);
+  saveSetting("manga-yolo", $("manga-yolo").checked ? "1" : "0");
 
   const panelMargin = parseInt($("manga-margin").value, 10);
   const margin = Number.isInteger(panelMargin) ? panelMargin : 10;
@@ -310,6 +344,19 @@ async function runMangaConversion() {
 
     if (Number.isInteger(maxPagesRaw) && maxPagesRaw > 0) pages = pages.slice(0, maxPagesRaw);
     logLine(`Found ${pages.length} pages in ${collected.sourceLabel}`);
+
+    // Same detector hierarchy as the Python tool: YOLO when available,
+    // white-gutter grid heuristic as the fallback.
+    let yolo = null;
+    if ($("manga-yolo").checked) {
+      try {
+        logLine("Loading AI panel detector (first load downloads ~21 MB, then it's cached)…");
+        yolo = await loadYoloDetector();
+        logLine("AI panel detector ready");
+      } catch (e) {
+        logLine(`Could not load the AI panel detector (${e.message}); using the grid heuristic.`, "warn");
+      }
+    }
 
     const metaTitle = $("manga-title").value.trim() || collected.meta.title;
     const metaAuthor = $("manga-author").value.trim() || collected.meta.author;
@@ -350,8 +397,18 @@ async function runMangaConversion() {
       }
 
       const rgba = ctx.getImageData(0, 0, imgW, imgH).data;
-      const gray = grayFromRGBA(rgba, imgW, imgH);
-      let boxes = detectPanelsGrid(gray, imgW, imgH);
+      let boxes = null;
+      if (yolo) {
+        try {
+          boxes = await detectPanelsYolo(yolo.session, yolo.ort, rgba, imgW, imgH);
+        } catch (e) {
+          logLine(`AI detection failed on this page (${e.message}); using the grid heuristic.`, "warn");
+        }
+      }
+      if (!boxes) {
+        const gray = grayFromRGBA(rgba, imgW, imgH);
+        boxes = detectPanelsGrid(gray, imgW, imgH);
+      }
       boxes = sortPanelsMangaOrder(boxes);
 
       // Crop panels (fast, local) before dispatching OCR calls concurrently.
@@ -458,6 +515,7 @@ async function runMangaConversion() {
 if (typeof document !== "undefined" && document.getElementById("manga-run")) {
   $("manga-key").value = loadSetting("gemini-key", "");
   $("manga-model").value = loadSetting("gemini-model", GEMINI_DEFAULT_MODEL);
+  $("manga-yolo").checked = loadSetting("manga-yolo", "1") === "1";
   $("manga-run").addEventListener("click", runMangaConversion);
   $("manga-cancel").addEventListener("click", () => { mangaState.cancelled = true; });
   $("manga-file").addEventListener("change", () => {

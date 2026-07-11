@@ -6,8 +6,9 @@ Usage:
     MATCHA_READER=/path/to/matcha-reader python3 test/gen_references.py
 
 Produces under test/fixtures/:
-    manga_pages/         synthetic PNG pages + raw grayscale dumps (.gray)
+    manga_pages/         synthetic PNG pages + raw grayscale (.gray) and RGBA (.rgba) dumps
     ref_manga/           convert_manga.py --no-ocr output
+    ref_yolo/boxes.json  YOLO panel boxes (needs numpy + onnxruntime, else skipped)
     yomitan.zip          synthetic Yomitan dictionary
     jmdict.json          synthetic jmdict-simplified JSON
     ref_dict_yomitan/    convert_jmdict.py output + .spx
@@ -68,6 +69,8 @@ def make_manga_pages():
     img.save(os.path.join(out, "page03.png"))
 
     # Raw grayscale dumps: exactly what PIL convert("L") feeds the detector.
+    # Raw RGBA dumps: exactly what canvas getImageData feeds the YOLO path
+    # (PNG decoding is lossless, so browser RGBA matches PIL byte-for-byte).
     for name in sorted(os.listdir(out)):
         if not name.endswith(".png"):
             continue
@@ -75,10 +78,27 @@ def make_manga_pages():
         gray = img.convert("L")
         with open(os.path.join(out, name.replace(".png", ".gray")), "wb") as f:
             f.write(gray.tobytes())
+        with open(os.path.join(out, name.replace(".png", ".rgba")), "wb") as f:
+            f.write(img.convert("RGBA").tobytes())
         dims[name] = list(img.size)
     with open(os.path.join(out, "dims.json"), "w") as f:
         json.dump(dims, f)
     print(f"manga pages: {out}")
+
+
+def grid_only_env():
+    """Environment that forces convert_manga.py onto its grid-heuristic path
+    even when ultralytics/huggingface_hub are installed: a stub module that
+    raises ImportError shadows the real ones, triggering the tool's own
+    fallback. The grid references must stay byte-comparable to the JS grid
+    port no matter what the local Python happens to have installed."""
+    stub_dir = os.path.join(FIXTURES, "_grid_only_stub")
+    os.makedirs(stub_dir, exist_ok=True)
+    with open(os.path.join(stub_dir, "huggingface_hub.py"), "w") as f:
+        f.write("raise ImportError('YOLO disabled: grid reference generation')\n")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = stub_dir + os.pathsep + env.get("PYTHONPATH", "")
+    return env
 
 
 def run_manga_reference():
@@ -90,7 +110,7 @@ def run_manga_reference():
                     "--output-dir", out,
                     "--no-ocr",
                     "--title", "Test Manga", "--author", "Test Author"],
-                   check=True)
+                   check=True, env=grid_only_env())
     print(f"manga reference: {out}")
 
 
@@ -166,8 +186,84 @@ def run_manga_epub_reference():
                     "--input", os.path.join(FIXTURES, "manga.epub"),
                     "--output-dir", out,
                     "--no-ocr"],
-                   check=True)
+                   check=True, env=grid_only_env())
     print(f"manga epub reference: {out}")
+
+
+def run_yolo_reference():
+    """Reference panel boxes for the AI (YOLO) detection path.
+
+    Mirrors js/yolo.js preprocessing/decoding numerically (bilinear letterbox,
+    float32 tensor, conf 0.4, class 0) against the same ONNX model the site
+    ships (models/manga_panel_detector_yolo26n.onnx), then reuses the firmware
+    tool's own is_sliver_panel / _dedupe_boxes / sort_panels_manga_order so
+    post-processing semantics can't drift from convert_manga.py.
+
+    Inference backends differ in float rounding, so the JS comparison is
+    tolerance-based (±2 px), unlike the byte-exact grid references.
+    """
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except ImportError as e:
+        print(f"yolo reference: SKIPPED ({e}; pip install numpy onnxruntime)")
+        return
+
+    sys.path.insert(0, os.path.join(FIRMWARE, "tools", "manga_convert"))
+    import convert_manga
+
+    model_path = os.path.join(os.path.dirname(__file__), "..", "models",
+                              "manga_panel_detector_yolo26n.onnx")
+    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    size, conf_thresh = 640, 0.4
+
+    def letterbox(rgb):
+        h, w = rgb.shape[:2]
+        scale = min(size / w, size / h)
+        nw, nh = round(w * scale), round(h * scale)
+        padx, pady = (size - nw) // 2, (size - nh) // 2
+        out = np.full((3, size, size), np.float32(114 / 255), dtype=np.float32)
+        ys = np.clip((np.arange(nh) + 0.5) / scale - 0.5, 0, h - 1)
+        xs = np.clip((np.arange(nw) + 0.5) / scale - 0.5, 0, w - 1)
+        y0 = np.floor(ys).astype(int); y1 = np.minimum(y0 + 1, h - 1)
+        x0 = np.floor(xs).astype(int); x1 = np.minimum(x0 + 1, w - 1)
+        fy = (ys - y0)[:, None, None]; fx = (xs - x0)[None, :, None]
+        p = rgb.astype(np.float64)
+        resized = (p[y0][:, x0] * (1 - fy) * (1 - fx) + p[y0][:, x1] * (1 - fy) * fx +
+                   p[y1][:, x0] * fy * (1 - fx) + p[y1][:, x1] * fy * fx)
+        out[:, pady:pady + nh, padx:padx + nw] = (resized / 255).transpose(2, 0, 1).astype(np.float32)
+        return out[None], scale, padx, pady
+
+    pages_dir = os.path.join(FIXTURES, "manga_pages")
+    out_dir = os.path.join(FIXTURES, "ref_yolo")
+    os.makedirs(out_dir, exist_ok=True)
+    result = {}
+    for name in sorted(os.listdir(pages_dir)):
+        if not name.endswith(".png"):
+            continue
+        img = Image.open(os.path.join(pages_dir, name)).convert("RGB")
+        inp, scale, padx, pady = letterbox(np.asarray(img))
+        rows = sess.run(None, {sess.get_inputs()[0].name: inp})[0][0]
+        boxes_with_conf = []
+        for x1, y1, x2, y2, conf, cls in rows:
+            if conf < conf_thresh or round(float(cls)) != 0:
+                continue
+            box = [int(max(0, min((x1 - padx) / scale, img.width))),
+                   int(max(0, min((y1 - pady) / scale, img.height))),
+                   int(max(0, min((x2 - padx) / scale, img.width))),
+                   int(max(0, min((y2 - pady) / scale, img.height)))]
+            if convert_manga.is_sliver_panel(box, img.width, img.height):
+                continue
+            boxes_with_conf.append((box, float(conf)))
+        boxes = convert_manga._dedupe_boxes(boxes_with_conf)
+        if not boxes:
+            boxes = [[0, 0, img.width, img.height]]
+        result[name] = convert_manga.sort_panels_manga_order(boxes)
+    with open(os.path.join(out_dir, "boxes.json"), "w") as f:
+        json.dump(result, f, indent=1)
+    print(f"yolo reference: {out_dir}")
+    for name, boxes in result.items():
+        print(f"  {name}: {boxes}")
 
 
 def make_yomitan_zip():
@@ -259,6 +355,7 @@ if __name__ == "__main__":
     os.makedirs(FIXTURES, exist_ok=True)
     make_manga_pages()
     run_manga_reference()
+    run_yolo_reference()
     make_manga_cbz()
     make_manga_epub()
     run_manga_epub_reference()

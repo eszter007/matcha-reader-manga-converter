@@ -21,7 +21,8 @@ const FIXTURES = path.join(ROOT, "test", "fixtures");
 const OUT = path.join(FIXTURES, "e2e_out");
 const FONT_PATH = process.env.TEST_FONT || "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
+               ".css": "text/css", ".wasm": "application/wasm" };
 
 function serve(rootDir) {
   const server = http.createServer((req, res) => {
@@ -92,10 +93,11 @@ async function testFonts(page, base) {
 }
 
 async function testManga(page, base) {
-  console.log("manga.html end-to-end (CBZ, no OCR):");
+  console.log("manga.html end-to-end (CBZ, no OCR, grid detection):");
   await page.goto(`${base}/manga.html`);
   await page.setInputFiles("#manga-file", path.join(FIXTURES, "manga.cbz"));
   await page.check("#manga-no-ocr");
+  await page.uncheck("#manga-yolo"); // byte-exact references use the grid path
   await page.fill("#manga-title", "Test Manga");
   await page.fill("#manga-author", "Test Author");
   const zipFile = await downloadFromPage(page, () => page.click("#manga-run"));
@@ -113,11 +115,67 @@ async function testManga(page, base) {
   }
 }
 
+/* Parse the panel rectangles back out of panels.idx/panels.dat (no-OCR
+ * layout: per page u8 count, u8 pad, then 12-byte panel records). */
+function parsePanelBoxes(dir) {
+  const idx = fs.readFileSync(path.join(dir, "panels.idx"));
+  const dat = fs.readFileSync(path.join(dir, "panels.dat"));
+  const pageCount = idx.readUInt32LE(4);
+  const pages = [];
+  for (let p = 0; p < pageCount; p++) {
+    let off = idx.readUInt32LE(8 + p * 12);
+    const count = dat.readUInt8(off);
+    off += 2;
+    const boxes = [];
+    for (let i = 0; i < count; i++) {
+      const x = dat.readUInt16LE(off), y = dat.readUInt16LE(off + 2);
+      const w = dat.readUInt16LE(off + 4), h = dat.readUInt16LE(off + 6);
+      boxes.push([x, y, x + w, y + h]);
+      off += 12;
+    }
+    pages.push(boxes);
+  }
+  return pages;
+}
+
+async function testMangaYolo(page, base) {
+  console.log("manga.html end-to-end (CBZ, no OCR, AI panel detection):");
+  const refPath = path.join(FIXTURES, "ref_yolo", "boxes.json");
+  if (!fs.existsSync(refPath)) {
+    console.log("  skip (no ref_yolo fixtures — rerun gen_references.py with numpy + onnxruntime installed)");
+    return;
+  }
+  const ref = JSON.parse(fs.readFileSync(refPath, "utf-8"));
+  await page.goto(`${base}/manga.html`);
+  await page.setInputFiles("#manga-file", path.join(FIXTURES, "manga.cbz"));
+  await page.check("#manga-no-ocr");
+  await page.check("#manga-yolo");
+  await page.fill("#manga-title", "Yolo Manga");
+  const zipFile = await downloadFromPage(page, () => page.click("#manga-run"));
+  const dest = path.join(OUT, "manga_yolo");
+  unzipTo(zipFile, dest);
+  const pages = parsePanelBoxes(path.join(dest, "Yolo Manga"));
+  const names = Object.keys(ref).sort();
+  check("page count", pages.length === names.length, `got ${pages.length}`);
+  // Same tolerance rationale as the Node test: inference backends round
+  // floats differently, so ±2 px rather than byte-exact.
+  const TOL = 2;
+  for (let p = 0; p < names.length && p < pages.length; p++) {
+    const expected = ref[names[p]];
+    const got = pages[p];
+    const ok = got.length === expected.length &&
+               got.every((b, i) => b.every((v, j) => Math.abs(v - expected[i][j]) <= TOL));
+    check(`${names[p]} ${expected.length} panel(s) within ±${TOL}px`, ok,
+          ok ? "" : `got ${JSON.stringify(got)}, reference ${JSON.stringify(expected)}`);
+  }
+}
+
 async function testMangaEpub(page, base) {
   console.log("manga.html end-to-end (EPUB with nav TOC, no OCR):");
   await page.goto(`${base}/manga.html`);
   await page.setInputFiles("#manga-file", path.join(FIXTURES, "manga.epub"));
   await page.check("#manga-no-ocr");
+  await page.uncheck("#manga-yolo");
   const zipFile = await downloadFromPage(page, () => page.click("#manga-run"));
   const dest = path.join(OUT, "manga_epub");
   unzipTo(zipFile, dest);
@@ -154,6 +212,7 @@ async function testDict(page, base) {
 
   try {
     await testManga(page, base);
+    await testMangaYolo(page, base);
     await testMangaEpub(page, base);
     await testDict(page, base);
     await testFonts(page, base);

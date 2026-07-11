@@ -37,7 +37,17 @@
   </div>
 
   <div class="card">
-    <h3>2. Text recognition (Gemini)</h3>
+    <h3>2. Panel detection</h3>
+    <div class="checks">
+      <label><input type="checkbox" id="manga-yolo" checked> AI panel detection
+        <span class="hint">— the same YOLO26 model as the desktop Python tool, running in your
+        browser (~21&nbsp;MB one-time download, then cached). Untick to use the white-gutter grid
+        heuristic instead.</span></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>3. Text recognition (Gemini)</h3>
     <label for="manga-key">Gemini API key
       <span class="hint">— free at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>. Stored only in this browser; sent only to Google.</span>
     </label>
@@ -57,7 +67,7 @@
   </div>
 
   <div class="card">
-    <h3>3. Book details <span class="hint" style="font-weight:400">(optional — auto-detected from EPUB/ComicInfo when present)</span></h3>
+    <h3>4. Book details <span class="hint" style="font-weight:400">(optional — auto-detected from EPUB/ComicInfo when present)</span></h3>
     <div class="row">
       <div>
         <label for="manga-title">Title</label>
@@ -94,13 +104,15 @@
 </main>
 <footer>
   Output matches <code>tools/manga_convert/convert_manga.py</code> from the
-  <a href="https://github.com/eszter007/matcha-reader">matcha-reader</a> firmware
-  (grid panel detection). PDF input needs the desktop Python tool.
+  <a href="https://github.com/eszter007/matcha-reader">matcha-reader</a> firmware —
+  including its YOLO panel detector, run in-browser via ONNX Runtime.
+  PDF input needs the desktop Python tool.
 </footer>
 <script src="js/binary.js"></script>
 <script src="js/zip.js"></script>
 <script src="js/common.js"></script>
 <script src="js/manga-core.js"></script>
+<script src="js/yolo.js"></script>
 <script src="js/manga-ui.js"></script>
 </body>
 </html>
