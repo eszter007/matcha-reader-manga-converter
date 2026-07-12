@@ -158,6 +158,27 @@ async function testDictYomitan() {
   compareFile("jmdict.spx", dict.dictGenSpx(idx), path.join(refDir, "jmdict.spx"));
 }
 
+async function testDictMdx() {
+  console.log("dictionary converter, MDict .mdx (vs readmdict + convert_jmdict.py):");
+  if (!fs.existsSync(path.join(FIXTURES, "dict.mdx"))) {
+    console.log("  skip (no MDX fixtures — rerun gen_references.py with readmdict + python-lzo installed)");
+    return;
+  }
+  const mdx = require("../../js/mdx.js");
+  const refDir = path.join(FIXTURES, "ref_dict_mdx");
+  // Three variants of the same content: plain zlib (+ one uncompressed
+  // record block), Encrypted=2 key index, and LZO-compressed blocks — all
+  // must produce the same bytes as the Python reference.
+  for (const name of ["dict.mdx", "dict_enc.mdx", "dict_lzo.mdx"]) {
+    const bytes = new Uint8Array(fs.readFileSync(path.join(FIXTURES, name)));
+    const { records } = await mdx.convertMdictRecords(bytes);
+    const { idx, dat } = dict.dictWriteBinary(records);
+    compareFile(`${name} → jmdict.idx`, idx, path.join(refDir, "jmdict.idx"));
+    compareFile(`${name} → jmdict.dat`, dat, path.join(refDir, "jmdict.dat"));
+    compareFile(`${name} → jmdict.spx`, dict.dictGenSpx(idx), path.join(refDir, "jmdict.spx"));
+  }
+}
+
 function testDictJmdict() {
   console.log("dictionary converter, JMdict JSON (vs convert_jmdict.py):");
   const refDir = path.join(FIXTURES, "ref_dict_jmdict");
@@ -194,6 +215,7 @@ async function testZipRoundTrip() {
   await testMangaYolo();
   await testDictYomitan();
   testDictJmdict();
+  await testDictMdx();
   await testZipRoundTrip();
   if (failures) {
     console.error(`\n${failures} failure(s)`);

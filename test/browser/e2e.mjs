@@ -66,6 +66,24 @@ function filesEqual(a, b) {
   return ba.length === bb.length && ba.equals(bb);
 }
 
+async function testDictMdx(page, base) {
+  console.log("dictionary.html end-to-end (MDict .mdx):");
+  if (!fs.existsSync(path.join(FIXTURES, "dict.mdx"))) {
+    console.log("  skip (no MDX fixtures — rerun gen_references.py with readmdict + python-lzo installed)");
+    return;
+  }
+  await page.goto(`${base}/dictionary.html`);
+  await page.setInputFiles("#dict-file", path.join(FIXTURES, "dict.mdx"));
+  const zipFile = await downloadFromPage(page, () => page.click("#dict-run"));
+  const dest = path.join(OUT, "dict_mdx");
+  unzipTo(zipFile, dest);
+  for (const ext of ["idx", "dat", "spx"]) {
+    const ref = path.join(FIXTURES, "ref_dict_mdx", `jmdict.${ext}`);
+    const got = path.join(dest, "dict", `jmdict.${ext}`);
+    check(`jmdict.${ext} matches Python reference`, fs.existsSync(got) && filesEqual(ref, got));
+  }
+}
+
 async function testFonts(page, base) {
   console.log("fonts.html end-to-end:");
   await page.goto(`${base}/fonts.html`);
@@ -255,6 +273,7 @@ async function testDict(page, base) {
     await testMangaEpub(page, base);
     await testMangaPdf(page, base);
     await testDict(page, base);
+    await testDictMdx(page, base);
     await testFonts(page, base);
   } finally {
     await browser.close();

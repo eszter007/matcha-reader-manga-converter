@@ -376,6 +376,123 @@ def make_jmdict_json():
     print(f"jmdict json: {path}")
 
 
+def make_mdx_fixtures():
+    """Synthetic MDict .mdx fixtures written by a minimal engine-2.0 writer:
+    dict.mdx (zlib + one uncompressed record block), dict_enc.mdx
+    (Encrypted=2 key index), dict_lzo.mdx (LZO blocks). Entries exercise
+    HTML stripping, entities, <br>, @@@LINK redirects, whitespace-only
+    definitions, and over-32-byte headwords. Readable by readmdict, so the
+    reference conversion exercises an implementation independent of js/mdx.js.
+
+    Needs readmdict (which itself needs python-lzo); skipped without it.
+    """
+    import zlib as z
+    from struct import pack
+    try:
+        import lzo
+        from readmdict.ripemd128 import ripemd128
+    except ImportError as e:
+        print(f"mdx fixtures: SKIPPED ({e}; pip install readmdict python-lzo)")
+        return False
+
+    entries = sorted([
+        ("猫", '<div class="entry"><b>ねこ</b><br/>cat; kitty &amp; friend</div>'),
+        ("犬", "plain dog definition"),
+        ("食べる", "<ul><li>to eat</li><li>to &lt;consume&gt;</li></ul>"),
+        ("たべれる", "@@@LINK=食べる"),                    # redirect → skipped
+        ("空白", "   "),                                    # empty after strip → skipped
+        ("この見出し語はとても長いので三十二バイトを超えます", "too-long headword"),  # ≥32 bytes → skipped
+        ("走る", "to run<br>to dash&nbsp;quickly"),
+        ("nbsp&#x27;quote", "it&#39;s an &quot;entity&quot; test"),
+    ])
+
+    def compress(data, comp):
+        if comp == 0:
+            payload = data
+        elif comp == 1:
+            payload = lzo.compress(data)[5:]  # strip python-lzo's 0xf0 + u32 length header
+        else:
+            payload = z.compress(data)
+        return pack("<I", comp) + pack(">I", z.adler32(data) & 0xffffffff) + payload
+
+    def fast_encrypt(data, key):
+        # Inverse of readmdict._fast_decrypt (nibble swap is self-inverse).
+        b = bytearray(data)
+        prev = 0x36
+        for i in range(len(b)):
+            t = (b[i] ^ prev ^ (i & 0xff) ^ key[i % len(key)]) & 0xff
+            b[i] = ((t >> 4) | (t << 4)) & 0xff
+            prev = b[i]
+        return bytes(b)
+
+    def build(path, comp, encrypted):
+        recs = [(k.encode(), v.encode() + b"\x00") for k, v in entries]
+        offsets, off = [], 0
+        for _, v in recs:
+            offsets.append(off)
+            off += len(v)
+        half = len(recs) // 2
+        groups = [list(range(half)), list(range(half, len(recs)))]
+
+        key_blocks, info_items = [], []
+        for g in groups:
+            kb = b"".join(pack(">Q", offsets[i]) + recs[i][0] + b"\x00" for i in g)
+            cb = compress(kb, comp)
+            key_blocks.append(cb)
+            info_items.append((len(g), recs[g[0]][0], recs[g[-1]][0], len(cb), len(kb)))
+
+        key_info = b""
+        for count, first, last, csize, dsize in info_items:
+            key_info += pack(">Q", count)
+            key_info += pack(">H", len(first)) + first + b"\x00"
+            key_info += pack(">H", len(last)) + last + b"\x00"
+            key_info += pack(">Q", csize) + pack(">Q", dsize)
+        key_info_block = compress(key_info, 2)  # v2 key index is always zlib
+        if encrypted & 2:
+            key = ripemd128(key_info_block[4:8] + pack("<L", 0x3695))
+            key_info_block = key_info_block[:8] + fast_encrypt(key_info_block[8:], key)
+
+        kw = pack(">QQQQQ", len(groups), len(recs), len(key_info),
+                  len(key_info_block), sum(len(b) for b in key_blocks))
+        kw += pack(">I", z.adler32(kw) & 0xffffffff)
+
+        # dict.mdx keeps its second record block uncompressed for type-0 coverage.
+        rec_data = [b"".join(recs[i][1] for i in g) for g in groups]
+        rec_comp = [comp, 0 if (comp == 2 and not encrypted) else comp]
+        rec_blocks = [compress(d, c) for d, c in zip(rec_data, rec_comp)]
+        rec_hdr = pack(">QQQQ", len(rec_blocks), len(recs), 16 * len(rec_blocks),
+                       sum(len(b) for b in rec_blocks))
+        rec_info = b"".join(pack(">QQ", len(cb), len(d)) for cb, d in zip(rec_blocks, rec_data))
+
+        attrs = (f'<Dictionary GeneratedByEngineVersion="2.0" RequiredEngineVersion="2.0" '
+                 f'Format="Html" KeyCaseSensitive="No" Encrypted="{encrypted}" '
+                 f'Encoding="UTF-8" Title="Test MDX &amp; fixture" CreationDate="2026-01-01"/>')
+        hb = attrs.encode("utf-16") + b"\x00\x00"
+        blob = pack(">I", len(hb)) + hb + pack("<I", z.adler32(hb) & 0xffffffff)
+        blob += kw + key_info_block + b"".join(key_blocks)
+        blob += rec_hdr + rec_info + b"".join(rec_blocks)
+        with open(path, "wb") as f:
+            f.write(blob)
+        print(f"mdx fixture: {path}")
+
+    build(os.path.join(FIXTURES, "dict.mdx"), comp=2, encrypted=0)
+    build(os.path.join(FIXTURES, "dict_enc.mdx"), comp=2, encrypted=2)
+    build(os.path.join(FIXTURES, "dict_lzo.mdx"), comp=1, encrypted=0)
+    return True
+
+
+def run_mdx_reference():
+    """convert_jmdict.py + gen_dict_spx.py on the plain MDX fixture."""
+    script = os.path.join(FIRMWARE, "tools", "dict_convert", "convert_jmdict.py")
+    spx_script = os.path.join(FIRMWARE, "scripts", "gen_dict_spx.py")
+    out = os.path.join(FIXTURES, "ref_dict_mdx")
+    shutil.rmtree(out, ignore_errors=True)
+    subprocess.run([sys.executable, script, "--input", os.path.join(FIXTURES, "dict.mdx"),
+                    "--output-dir", out], check=True)
+    subprocess.run([sys.executable, spx_script, out], check=True)
+    print(f"mdx reference: {out}")
+
+
 def run_dict_references():
     script = os.path.join(FIRMWARE, "tools", "dict_convert", "convert_jmdict.py")
     spx_script = os.path.join(FIRMWARE, "scripts", "gen_dict_spx.py")
@@ -402,4 +519,6 @@ if __name__ == "__main__":
     make_yomitan_zip()
     make_jmdict_json()
     run_dict_references()
+    if make_mdx_fixtures():
+        run_mdx_reference()
     print("done")

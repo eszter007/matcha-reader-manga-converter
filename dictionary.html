@@ -27,13 +27,13 @@
   <div class="card">
     <h3>1. Choose a dictionary file</h3>
     <label class="filebtn">
-      <span>Tap to choose a Yomitan .zip or jmdict-simplified .json / .json.tgz</span>
-      <input type="file" id="dict-file" accept=".zip,.json,.tgz,.gz">
+      <span>Tap to choose a Yomitan .zip, jmdict-simplified .json / .json.tgz, or MDict .mdx</span>
+      <input type="file" id="dict-file" accept=".zip,.json,.tgz,.gz,.mdx">
     </label>
     <p style="color:var(--muted);font-size:0.85rem;margin-bottom:0">
       Recommended sources: <a href="https://github.com/stephenmk/Jitendex/releases" target="_blank" rel="noopener">Jitendex</a>
       (vocabulary, Yomitan format), JMnedict in Yomitan format (names), or a grammar reference in
-      Yomitan format. MDict (.mdx) files need the desktop Python tool.</p>
+      Yomitan format. MDict .mdx also works (registration-encrypted files are not supported).</p>
   </div>
 
   <div class="card">
@@ -76,6 +76,7 @@
 <script src="js/zip.js"></script>
 <script src="js/common.js"></script>
 <script src="js/dict.js"></script>
+<script src="js/mdx.js"></script>
 <script src="js/dict-ui.js"></script>
 </body>
 </html>

@@ -48,8 +48,11 @@ These are ports of the firmware's conversion scripts, not reimplementations from
   panel boxes — can differ from the desktop tool by a pixel or two (verified within ±2 px);
   every other input type is pixel-exact.
 - **Dictionary** ports `tools/dict_convert/convert_jmdict.py` and `scripts/gen_dict_spx.py`
-  **byte-identically** (JMdict-simplified JSON and Yomitan zip inputs; MDict `.mdx` needs the
-  desktop tool).
+  **byte-identically** — JMdict-simplified JSON, Yomitan zip, and MDict `.mdx` inputs. The MDX
+  reader (`js/mdx.js`) is a port of `readmdict` (the desktop tool's MDX dependency): engine
+  versions 1.2/2.0, zlib / LZO / uncompressed blocks, and `Encrypted=2` key-index encryption
+  (ripemd128). Registration-encrypted files (`Encrypted=1`) are rejected, exactly like the
+  desktop tool without a passcode.
 - **Fonts** ports `lib/EpdFont/scripts/fontconvert_sdcard.py` (.cpfont v4). Everything read from
   the font file — cmap intervals, advance widths, kerning classes/matrix, ligature tables —
   matches the Python tool byte-for-byte. Glyph bitmaps are rasterized by the browser's font
@@ -65,6 +68,7 @@ bytes. It needs a checkout of the firmware repo next door (or set `MATCHA_READER
 pip install Pillow freetype-py fonttools    # for reference generation
 pip install numpy onnxruntime               # optional: YOLO panel-detection references
 pip install pymupdf                          # optional: PDF-input references
+pip install readmdict python-lzo             # optional: MDict .mdx references (needs liblzo2-dev)
 python3 test/gen_references.py             # build fixtures + Python references
 
 npm install onnxruntime-web                # optional: YOLO detection in the Node tests

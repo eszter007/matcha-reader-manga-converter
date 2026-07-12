@@ -70,8 +70,16 @@ async function runDictConversion() {
       logLine(`Processing ${(data.words || []).length} JMdict entries…`);
       records = convertJmdictRecords(data, (done, total) => setProgress(done, total, `Converting entries: ${done}/${total}`));
 
+    } else if (lower.endsWith(".mdx")) {
+      logLine(`Loading ${file.name} (MDict format)…`);
+      setProgress(0, 1, "Parsing MDX…");
+      const bytes = await readFileBytes(file);
+      const result = await convertMdictRecords(bytes, (seen) => setProgress(0, 1, `Reading entries: ${seen.toLocaleString()}…`));
+      logLine(`Processed ${result.entryCount} MDict entries (${result.skipped} skipped) → ${result.records.length} index records`);
+      records = result.records;
+
     } else {
-      throw new Error("Unsupported input. Use a Yomitan .zip or jmdict-simplified .json/.json.tgz. (MDict .mdx needs the desktop Python tool.)");
+      throw new Error("Unsupported input. Use a Yomitan .zip, jmdict-simplified .json/.json.tgz, or MDict .mdx.");
     }
 
     setProgress(0, 1, "Sorting and writing binary index…");
