@@ -2,7 +2,7 @@
 
 Browser-based converters for the [Matcha Reader](https://github.com/eszter007/matcha-reader)
 e-reader firmware (a CrossPoint Reader fork with Japanese learning features). Everything runs
-client-side — **no installs, no uploads, works from a smartphone**. Your files never leave your
+client-side — **no installs, no uploads**. Your files never leave your
 device, except manga panel images sent to Google's Gemini API when you supply your own API key
 for OCR.
 
@@ -15,7 +15,7 @@ for OCR.
 | 🔤 **Font Converter** | TTF / OTF (up to 4 styles + fallback font) | `.fonts/<Family>/<Family>_<size>.cpfont` (v4, with kerning + ligatures) |
 
 Each tool downloads a zip already laid out for the SD card: unzip it onto the card, or upload the
-files from your phone via the reader's built-in Wi-Fi web file transfer — no computer needed.
+files via the reader's built-in Wi-Fi web file transfer.
 
 ## Hosting / running
 
@@ -91,7 +91,7 @@ node test/browser/e2e.mjs
   packages every fully-converted page). The key is kept in `localStorage` and sent only to
   Google's API endpoint.
 - **Memory**: pages are processed one at a time, but the output zip is assembled in memory —
-  very large volumes (many hundreds of MB) may struggle on low-RAM phones.
+  very large volumes (many hundreds of MB) may struggle on low-RAM devices.
 - Browsers with `DecompressionStream` are required (Chrome/Edge ≥ 80, Safari ≥ 16.4,
   Firefox ≥ 113).
 
