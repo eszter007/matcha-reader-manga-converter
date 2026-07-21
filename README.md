@@ -41,6 +41,11 @@ These are ports of the firmware's conversion scripts, not reimplementations from
   inference backends); post-processing (confidence 0.4, sliver filter, overlap dedupe, reading
   order) is identical. Untick *AI panel detection* to force the grid heuristic, which is also
   the automatic fallback wherever WebAssembly or the download fails.
+  Tick *1-bit BMP (Floyd–Steinberg dithering)* to write pages and panel crops as black-and-white
+  dithered BMP instead of JPEG (the desktop tool's `--mono`). The device paints 1-bit BMP with a
+  single fast refresh (no 4-level gray pass), so pages and panels turn noticeably quicker; it's
+  best for pure line art (screentone gradients become dither patterns) and pairs naturally with
+  *Skip OCR*.
   PDF input works like the desktop tool's (which uses PyMuPDF): pages are rasterized at 2× zoom
   in document order and Title/Author come from the PDF metadata, but rendering happens in-browser
   via a vendored [PDF.js](https://mozilla.github.io/pdf.js/) (lazy-loaded, ~1.8 MB). PDF
