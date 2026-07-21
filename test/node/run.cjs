@@ -94,6 +94,78 @@ function testManga() {
   check("2x2 grid order", grid[0] === tr && grid[1] === tl && grid[2] === br && grid[3] === bl);
 }
 
+/* ── Manga: 1-bit Floyd-Steinberg BMP output (--mono) ─────────── */
+
+/* Decode the structural fields and unpack the bits of a 1-bit BMP the way the
+ * device's Bitmap reader does (MSB-first, bottom-up, 4-byte row stride). */
+function decodeBmp1bit(bmp) {
+  const dv = new DataView(bmp.buffer, bmp.byteOffset, bmp.byteLength);
+  const offBits = dv.getUint32(10, true);
+  const width = dv.getInt32(18, true);
+  const height = dv.getInt32(22, true);
+  const bpp = dv.getUint16(28, true);
+  const comp = dv.getUint32(30, true);
+  const colorsUsed = dv.getUint32(46, true);
+  const rowBytes = ((width + 31) >> 5) << 2;
+  const mono = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const srcRow = offBits + (height - 1 - y) * rowBytes; // bottom-up
+    for (let x = 0; x < width; x++) {
+      const bit = bmp[srcRow + (x >> 3)] & (0x80 >> (x & 7));
+      mono[y * width + x] = bit ? 1 : 0;
+    }
+  }
+  return { magic: bmp[0] === 0x42 && bmp[1] === 0x4d, offBits, width, height, bpp, comp, colorsUsed, rowBytes, mono };
+}
+
+function testMangaMono() {
+  console.log("manga 1-bit BMP output (--mono / Floyd-Steinberg):");
+
+  // Solid inputs must dither to a uniform field regardless of size.
+  const w = 13, h = 7;                       // width forces row padding (13 → 4-byte stride)
+  const white = new Uint8Array(w * h).fill(255);
+  const black = new Uint8Array(w * h).fill(0);
+  check("solid white → all 1s", manga.floydSteinbergMono(white, w, h).every((v) => v === 1));
+  check("solid black → all 0s", manga.floydSteinbergMono(black, w, h).every((v) => v === 0));
+
+  // BMP structure the device relies on: BI_RGB, 1 bpp, 2-colour palette, and a
+  // 4-byte-aligned row stride (13px → 4 bytes, not 2).
+  const mono = manga.floydSteinbergMono(white, w, h);
+  const bmp = manga.encodeBmp1bit(mono, w, h);
+  const d = decodeBmp1bit(bmp);
+  check("BMP magic 'BM'", d.magic);
+  check("BMP is 1 bpp", d.bpp === 1, `got ${d.bpp}`);
+  check("BMP is BI_RGB", d.comp === 0, `got ${d.comp}`);
+  check("BMP width/height", d.width === w && d.height === h, `got ${d.width}x${d.height}`);
+  check("BMP palette 2 colours", d.colorsUsed === 2, `got ${d.colorsUsed}`);
+  check("BMP row stride padded to 4", d.rowBytes === 4, `got ${d.rowBytes}`);
+  check("BMP total size", bmp.length === 62 + d.rowBytes * h, `got ${bmp.length}`);
+
+  // Bits round-trip through the device's unpacking exactly.
+  const monoBack = decodeBmp1bit(manga.encodeBmp1bit(mono, w, h)).mono;
+  check("mono bits round-trip", monoBack.every((v, i) => v === mono[i]));
+
+  // A vertical split (left black, right white) survives dithering and packing:
+  // the left half stays black, the right half stays white.
+  const split = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) split[y * w + x] = x < w >> 1 ? 0 : 255;
+  const splitBack = decodeBmp1bit(manga.encodeBmp1bit(manga.floydSteinbergMono(split, w, h), w, h)).mono;
+  let leftBlack = true, rightWhite = true;
+  for (let y = 0; y < h; y++) {
+    if (splitBack[y * w + 0] !== 0) leftBlack = false;
+    if (splitBack[y * w + (w - 1)] !== 1) rightWhite = false;
+  }
+  check("split page: left edge black", leftBlack);
+  check("split page: right edge white", rightWhite);
+
+  // RGBA convenience path packs the same bytes as gray → dither → encode.
+  const rgba = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) { rgba[i * 4] = 255; rgba[i * 4 + 1] = 255; rgba[i * 4 + 2] = 255; rgba[i * 4 + 3] = 255; }
+  const viaRgba = manga.encodeMonoBmpFromRGBA(rgba, w, h);
+  const viaGray = manga.encodeBmp1bit(manga.floydSteinbergMono(manga.grayFromRGBA(rgba, w, h), w, h), w, h);
+  check("encodeMonoBmpFromRGBA matches manual path", binary.bytesEqual(viaRgba, viaGray));
+}
+
 /* ── Manga: YOLO panel detection vs Python reference ──────────── */
 
 async function testMangaYolo() {
@@ -224,6 +296,7 @@ async function testZipRoundTrip() {
 
 (async () => {
   testManga();
+  testMangaMono();
   await testMangaYolo();
   await testDictYomitan();
   testDictJmdict();

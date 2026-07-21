@@ -244,6 +244,93 @@ function sortPanelsMangaOrder(panels) {
   return result.map((i) => panels[i]);
 }
 
+/* ── 1-bit BMP output (Floyd-Steinberg dithering) ─────────────── */
+
+/* Floyd-Steinberg error-diffusion dither of an 8-bit grayscale buffer down to
+ * 1-bit black/white. Returns a Uint8Array of w*h values (1 = white, 0 = black).
+ * Mirrors the intent of convert_manga.py's --mono path, which uses PIL's
+ * Image.convert("L").convert("1") (Floyd-Steinberg is PIL's default dither):
+ * threshold at 128, error diffused with the classic 7/3/5/1 kernel. Byte-exact
+ * parity with PIL is not required — page and panel images are re-encoded in the
+ * browser exactly like the JPEG path, and only the binary panels.idx/dat/
+ * meta.bin/toc.idx files are compared byte-for-byte against the Python tool. */
+function floydSteinbergMono(gray, w, h) {
+  // Signed accumulator so diffused error can push a pixel outside 0..255.
+  const acc = new Int32Array(gray.length);
+  for (let i = 0; i < gray.length; i++) acc[i] = gray[i];
+
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const i = row + x;
+      const oldVal = acc[i];
+      const newVal = oldVal < 128 ? 0 : 255;
+      out[i] = newVal ? 1 : 0;
+      const err = oldVal - newVal;
+      if (err === 0) continue;
+      if (x + 1 < w) acc[i + 1] += (err * 7) >> 4;
+      if (y + 1 < h) {
+        if (x > 0) acc[i + w - 1] += (err * 3) >> 4;
+        acc[i + w] += (err * 5) >> 4;
+        if (x + 1 < w) acc[i + w + 1] += err >> 4;
+      }
+    }
+  }
+  return out;
+}
+
+/* Pack a 1-bit mono buffer (1 = white) into a standard uncompressed BI_RGB BMP:
+ * 14-byte file header, 40-byte BITMAPINFOHEADER, a 2-entry black/white palette,
+ * then bottom-up rows padded to a 4-byte stride with MSB-first bit packing.
+ * This is exactly the shape the device's 1-bit fast path expects (see
+ * lib/GfxRenderer/Bitmap.cpp in matcha-reader). */
+function encodeBmp1bit(mono, w, h) {
+  const rowBytes = ((w + 31) >> 5) << 2;   // 4-byte-aligned row stride
+  const pixelBytes = rowBytes * h;
+  const HEADER = 14 + 40 + 8;              // file header + DIB header + palette
+  const out = new ByteWriter(HEADER + pixelBytes);
+
+  // BMP file header (14 bytes).
+  out.u8(0x42); out.u8(0x4d);              // "BM"
+  out.u32(HEADER + pixelBytes);            // file size
+  out.u32(0);                              // reserved
+  out.u32(HEADER);                         // offset to pixel data
+
+  // BITMAPINFOHEADER (40 bytes).
+  out.u32(40);                             // header size
+  out.u32(w);                              // width  (positive)
+  out.u32(h);                              // height (positive → bottom-up)
+  out.u16(1);                              // planes
+  out.u16(1);                              // bits per pixel
+  out.u32(0);                              // BI_RGB (uncompressed)
+  out.u32(pixelBytes);                     // image byte size
+  out.u32(0); out.u32(0);                  // x/y pixels-per-metre
+  out.u32(2);                              // colours used
+  out.u32(0);                              // important colours
+
+  // Palette: index 0 = black, index 1 = white (stored B, G, R, reserved).
+  out.u8(0); out.u8(0); out.u8(0); out.u8(0);
+  out.u8(0xff); out.u8(0xff); out.u8(0xff); out.u8(0);
+
+  // Pixel rows: bottom-up, MSB-first bits, zero-padded to rowBytes.
+  const rowBuf = new Uint8Array(rowBytes);
+  for (let y = h - 1; y >= 0; y--) {
+    rowBuf.fill(0);
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if (mono[row + x]) rowBuf[x >> 3] |= 0x80 >> (x & 7);
+    }
+    out.bytes(rowBuf);
+  }
+  return out.toUint8Array();
+}
+
+/* Convenience: RGBA pixels → 1-bit Floyd-Steinberg-dithered BMP bytes. */
+function encodeMonoBmpFromRGBA(rgba, w, h) {
+  return encodeBmp1bit(floydSteinbergMono(grayFromRGBA(rgba, w, h), w, h), w, h);
+}
+
 /* ── Binary output ────────────────────────────────────────────── */
 
 /* panelsWithText: [{box:[x1,y1,x2,y2], textBlocks:[{box:[x1,y1,x2,y2], text}],
@@ -479,6 +566,7 @@ if (typeof module !== "undefined") {
     MANGA_FORMAT_VERSION, isImageName, baseName, mangaFileExt,
     naturalSortKey, compareNaturalKeys, naturalSortPaths,
     grayFromRGBA, mergeSmallGaps, detectPanelsGrid, isFullPagePanel,
+    floydSteinbergMono, encodeBmp1bit, encodeMonoBmpFromRGBA,
     yOverlapFrac, sortPanelsMangaOrder,
     encodePage, writePanelsIdx, writeMetaBin, writeTocIdx,
     pathDirname, pathNorm, pathJoinNorm,

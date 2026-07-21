@@ -378,6 +378,7 @@ async function runMangaConversion() {
   }
 
   const noOcr = $("manga-no-ocr").checked;
+  const mono = $("manga-mono").checked;
   const apiKey = $("manga-key").value.trim();
   const model = $("manga-model").value.trim() || GEMINI_DEFAULT_MODEL;
   if (!noOcr && !apiKey) {
@@ -387,6 +388,7 @@ async function runMangaConversion() {
   saveSetting("gemini-key", apiKey);
   saveSetting("gemini-model", model);
   saveSetting("manga-yolo", $("manga-yolo").checked ? "1" : "0");
+  saveSetting("manga-mono", mono ? "1" : "0");
 
   const panelMargin = parseInt($("manga-margin").value, 10);
   const margin = Number.isInteger(panelMargin) ? panelMargin : 10;
@@ -463,15 +465,20 @@ async function runMangaConversion() {
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(bitmap, 0, 0);
 
-      // Copy the page to a canonical, trivially-sortable filename.
+      const rgba = ctx.getImageData(0, 0, imgW, imgH).data;
+
+      // Copy the page to a canonical, trivially-sortable filename. In mono mode
+      // it becomes a 1-bit Floyd-Steinberg-dithered BMP the device paints with a
+      // single fast black-and-white refresh (no 4-level gray pass).
       const pageBase = `page_${String(pageIdx).padStart(4, "0")}`;
-      if ([".jpg", ".jpeg", ".png"].includes(ext)) {
+      if (mono) {
+        zip.addFile(`${folder}/${pageBase}.bmp`, encodeMonoBmpFromRGBA(rgba, imgW, imgH));
+      } else if ([".jpg", ".jpeg", ".png"].includes(ext)) {
         zip.addFile(`${folder}/${pageBase}${ext}`, srcBytes);
       } else {
         zip.addFile(`${folder}/${pageBase}.jpg`, await canvasToJpegBytes(canvas, 0.92));
       }
 
-      const rgba = ctx.getImageData(0, 0, imgW, imgH).data;
       let boxes = null;
       if (yolo) {
         try {
@@ -495,14 +502,23 @@ async function runMangaConversion() {
         const my1 = Math.max(0, y1 - margin);
         const mx2 = Math.min(imgW, x2 + margin);
         const my2 = Math.min(imgH, y2 + margin);
-        let cropBytes = null;
+        let cropBytes = null;  // full-colour JPEG crop for OCR (null = no crop / no OCR)
         if (!isFullPagePanel(boxes[panelIdx], imgW, imgH)) {
           const cw = mx2 - mx1, ch = my2 - my1;
           const cropCanvas = makeCanvas(cw, ch);
           const cropCtx = cropCanvas.getContext("2d");
           cropCtx.drawImage(bitmap, mx1, my1, cw, ch, 0, 0, cw, ch);
-          cropBytes = await canvasToJpegBytes(cropCanvas, 0.90);
-          zip.addFile(`${folder}/p${pageIdx}_${panelIdx}.jpg`, cropBytes);
+          if (mono) {
+            const cropRgba = cropCtx.getImageData(0, 0, cw, ch).data;
+            zip.addFile(`${folder}/p${pageIdx}_${panelIdx}.bmp`, encodeMonoBmpFromRGBA(cropRgba, cw, ch));
+            // OCR still reads a full-colour JPEG crop: the dithered BMP would
+            // only hurt text recognition (the --mono guidance to pair with
+            // --no-ocr still applies, but OCR stays usable when both are on).
+            if (!noOcr) cropBytes = await canvasToJpegBytes(cropCanvas, 0.90);
+          } else {
+            cropBytes = await canvasToJpegBytes(cropCanvas, 0.90);
+            zip.addFile(`${folder}/p${pageIdx}_${panelIdx}.jpg`, cropBytes);
+          }
         }
         panelCrops.push(cropBytes);
         panelRects.push([mx1, my1, mx2, my2]);
@@ -570,7 +586,8 @@ async function runMangaConversion() {
     setProgress(pagesDone, pages.length, "Packaging…");
     const blob = zip.toBlob();
     logLine(`Done: ${pagesDone} pages, ${totalPanels} panels` +
-      (noOcr ? "" : `, ${totalTextBlocks} text blocks`) + ` — ${formatBytes(blob.size)}`);
+      (noOcr ? "" : `, ${totalTextBlocks} text blocks`) +
+      (mono ? ", 1-bit dithered BMP" : "") + ` — ${formatBytes(blob.size)}`);
     logLine(`Unzip onto the SD card (e.g. /manga/) or upload the "${folder}" folder via the device's web file transfer.`);
     downloadBlob(blob, `${folder}.zip`);
     setProgress(pagesDone, pagesDone, "Complete");
@@ -592,6 +609,7 @@ if (typeof document !== "undefined" && document.getElementById("manga-run")) {
   $("manga-key").value = loadSetting("gemini-key", "");
   $("manga-model").value = loadSetting("gemini-model", GEMINI_DEFAULT_MODEL);
   $("manga-yolo").checked = loadSetting("manga-yolo", "1") === "1";
+  $("manga-mono").checked = loadSetting("manga-mono", "0") === "1";
   $("manga-run").addEventListener("click", runMangaConversion);
   $("manga-cancel").addEventListener("click", () => { mangaState.cancelled = true; });
   $("manga-file").addEventListener("change", () => {
