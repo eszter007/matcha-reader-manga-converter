@@ -377,6 +377,14 @@ function loadYoloDetector() {
 
 /* ── Conversion pipeline ──────────────────────────────────────── */
 
+/* Clamp a resolution choice to a real MANGA_DEVICE_TARGETS key (own-property
+ * only, so "__proto__" etc. can't slip through) or "" for original. Guards both
+ * the persisted <select> value and the conversion path against junk in
+ * localStorage. */
+function validResChoice(v) {
+  return Object.prototype.hasOwnProperty.call(MANGA_DEVICE_TARGETS, v) ? v : "";
+}
+
 const mangaState = { running: false, cancelled: false };
 
 /* Assemble the collected page/panel images into a fixed-layout EPUB 3 (a zip
@@ -431,6 +439,12 @@ async function runMangaConversion() {
   const noOcr = $("manga-no-ocr").checked;
   const mono = $("manga-mono").checked;
   const epub = $("manga-epub").checked;
+  // Target device resolution: "" (original), "x3", or "x4". Downscales pages and
+  // panels before detection so the device decodes fewer pixels; never upscales.
+  // Validate against own keys so a stray persisted value (e.g. "__proto__")
+  // can't yield Object.prototype and NaN sizes downstream.
+  const resChoice = validResChoice($("manga-res").value);
+  const deviceTarget = resChoice ? MANGA_DEVICE_TARGETS[resChoice] : null;
   const apiKey = $("manga-key").value.trim();
   const model = $("manga-model").value.trim() || GEMINI_DEFAULT_MODEL;
   if (!noOcr && !apiKey) {
@@ -442,6 +456,7 @@ async function runMangaConversion() {
   saveSetting("manga-yolo", $("manga-yolo").checked ? "1" : "0");
   saveSetting("manga-mono", mono ? "1" : "0");
   saveSetting("manga-epub", epub ? "1" : "0");
+  saveSetting("manga-res", resChoice);
 
   const panelMargin = parseInt($("manga-margin").value, 10);
   const margin = Number.isInteger(panelMargin) ? panelMargin : 10;
@@ -516,34 +531,52 @@ async function runMangaConversion() {
       const srcBytes = await page.read();
       let ext = mangaFileExt(page.name);
       const bitmap = await decodeImage(srcBytes, ext);
-      const imgW = bitmap.width, imgH = bitmap.height;
+
+      // Downscale FIRST, before panel detection, so every downstream coordinate
+      // (panel boxes, crop rects, OCR text boxes, the page dims in panels.idx)
+      // lives in the resized space and matches the files actually written. When
+      // no device is selected fit.resized is false and this is a 1:1 draw — the
+      // default output is unchanged. Fill white first so transparent sources
+      // composite onto white (like the device's alpha handling), not black.
+      const fit = fitToDeviceSize(bitmap.width, bitmap.height, deviceTarget);
+      const imgW = fit.w, imgH = fit.h;
+      const wasResized = fit.resized;
 
       const canvas = makeCanvas(imgW, imgH);
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(bitmap, 0, 0);
+      if (wasResized) { ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, imgW, imgH); }
+      ctx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, imgW, imgH);
+      bitmap.close();  // all further pixels come from the (possibly resized) canvas
 
       const rgba = ctx.getImageData(0, 0, imgW, imgH).data;
 
       // Copy the page to a canonical, trivially-sortable filename. In mono mode
       // it becomes a 1-bit Floyd-Steinberg-dithered BMP the device paints with a
-      // single fast black-and-white refresh (no 4-level gray pass).
+      // single fast black-and-white refresh (no 4-level gray pass). A resized
+      // JPEG/PNG page is re-encoded (source bytes no longer match); otherwise the
+      // source is copied byte-for-byte.
       const pageBase = `page_${String(pageIdx).padStart(4, "0")}`;
       if (mono) {
         zip.addFile(`${folder}/${pageBase}.bmp`, encodeMonoBmpFromRGBA(rgba, imgW, imgH));
-      } else if ([".jpg", ".jpeg", ".png"].includes(ext)) {
+      } else if ([".jpg", ".jpeg", ".png"].includes(ext) && !wasResized) {
         zip.addFile(`${folder}/${pageBase}${ext}`, srcBytes);
+      } else if (ext === ".png" && wasResized) {
+        zip.addFile(`${folder}/${pageBase}.png`, await canvasToPngBytes(canvas));
       } else {
-        zip.addFile(`${folder}/${pageBase}.jpg`, await canvasToJpegBytes(canvas, 0.92));
+        const outExt = (ext === ".jpg" || ext === ".jpeg") ? ext : ".jpg";
+        zip.addFile(`${folder}/${pageBase}${outExt}`, await canvasToJpegBytes(canvas, 0.92));
       }
 
       // The EPUB always uses a widely-supported core media type (JPEG/PNG); the
       // full page is never rotated (it's the overview). Reuse the source bytes
-      // when they're already JPEG/PNG, otherwise re-encode from the canvas.
+      // when they're already JPEG/PNG and unresized, otherwise re-encode from the
+      // (possibly downscaled) canvas.
       const epubImages = [];
       if (epub) {
         let pageBytes, pageMime;
-        if (ext === ".jpg" || ext === ".jpeg") { pageBytes = srcBytes; pageMime = "image/jpeg"; }
-        else if (ext === ".png") { pageBytes = srcBytes; pageMime = "image/png"; }
+        if (!wasResized && (ext === ".jpg" || ext === ".jpeg")) { pageBytes = srcBytes; pageMime = "image/jpeg"; }
+        else if (!wasResized && ext === ".png") { pageBytes = srcBytes; pageMime = "image/png"; }
+        else if (ext === ".png") { pageBytes = await canvasToPngBytes(canvas); pageMime = "image/png"; }
         else { pageBytes = await canvasToJpegBytes(canvas, 0.92); pageMime = "image/jpeg"; }
         epubImages.push({ bytes: pageBytes, mime: pageMime, w: imgW, h: imgH });
       }
@@ -576,7 +609,9 @@ async function runMangaConversion() {
           const cw = mx2 - mx1, ch = my2 - my1;
           const cropCanvas = makeCanvas(cw, ch);
           const cropCtx = cropCanvas.getContext("2d");
-          cropCtx.drawImage(bitmap, mx1, my1, cw, ch, 0, 0, cw, ch);
+          // Crop from the (possibly downscaled) page canvas, not the source
+          // bitmap, so crops live in the same space as the detected boxes.
+          cropCtx.drawImage(canvas, mx1, my1, cw, ch, 0, 0, cw, ch);
           if (mono) {
             const cropRgba = cropCtx.getImageData(0, 0, cw, ch).data;
             zip.addFile(`${folder}/p${pageIdx}_${panelIdx}.bmp`, encodeMonoBmpFromRGBA(cropRgba, cw, ch));
@@ -600,7 +635,6 @@ async function runMangaConversion() {
         panelCrops.push(cropBytes);
         panelRects.push([mx1, my1, mx2, my2]);
       }
-      bitmap.close();
 
       if (epub) epubPages.push({ pageIdx, images: epubImages });
 
@@ -674,6 +708,7 @@ async function runMangaConversion() {
     const blob = zip.toBlob();
     logLine(`Done: ${pagesDone} pages, ${totalPanels} panels` +
       (noOcr ? "" : `, ${totalTextBlocks} text blocks`) +
+      (deviceTarget ? `, ${resChoice.toUpperCase()} resolution` : "") +
       (mono ? ", 1-bit dithered BMP" : "") +
       (epub ? ", + portable EPUB" : "") + ` — ${formatBytes(blob.size)}`);
     logLine(`Unzip onto the SD card (e.g. /manga/) or upload the "${folder}" folder via the device's web file transfer.` +
@@ -700,6 +735,7 @@ if (typeof document !== "undefined" && document.getElementById("manga-run")) {
   $("manga-yolo").checked = loadSetting("manga-yolo", "1") === "1";
   $("manga-mono").checked = loadSetting("manga-mono", "0") === "1";
   $("manga-epub").checked = loadSetting("manga-epub", "0") === "1";
+  $("manga-res").value = validResChoice(loadSetting("manga-res", ""));
   $("manga-run").addEventListener("click", runMangaConversion);
   $("manga-cancel").addEventListener("click", () => { mangaState.cancelled = true; });
   $("manga-file").addEventListener("change", () => {
