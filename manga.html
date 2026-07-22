@@ -57,6 +57,17 @@
         EPUB image types, so the BMP option doesn't affect it. Adds memory and time for big
         volumes.</span></label>
     </div>
+    <label for="manga-res" style="margin-top:0.6rem">Target resolution</label>
+    <select id="manga-res">
+      <option value="">Original (default — keep full resolution)</option>
+      <option value="x4">Xteink X4 — 480×800</option>
+      <option value="x3">Xteink X3 — 528×792</option>
+    </select>
+    <p class="hint" style="color:var(--muted);font-size:0.85rem;margin:0.3rem 0 0">
+      Downscales pages and panels to fit the chosen device screen (landscape images fit the rotated
+      box), so the download is smaller and the device decodes far fewer pixels per page — no visible
+      quality loss. Never upscales. Applies to every format (JPEG/PNG/BMP) and the EPUB. Leave on
+      <em>Original</em> to keep full resolution.</p>
   </div>
 
   <div class="card">

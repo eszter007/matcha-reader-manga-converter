@@ -53,6 +53,13 @@ These are ports of the firmware's conversion scripts, not reimplementations from
   carried over as the EPUB table of contents. Panel images are JPEG and pages keep their original
   JPEG/PNG — both core EPUB media types, so the 1-bit BMP option doesn't affect the EPUB. This is
   Matcha-tools-only — the desktop Python tool has no EPUB export.
+  The *Target resolution* dropdown (the desktop tool's `--x3`/`--x4`) downscales pages and panels to
+  a device screen — **X4** (480×800) or **X3** (528×792) — before panel detection, so the download
+  is smaller and the device decodes far fewer pixels per page; landscape images fit the rotated box,
+  and it never upscales. *Original* (the default) keeps full resolution and is byte-identical to the
+  Python tool; when a device is selected the browser's image resampling differs slightly from
+  Pillow's, so — like PDF input — the downscaled pixels (and therefore panel boxes) can differ from
+  the desktop tool by a pixel or two.
   PDF input works like the desktop tool's (which uses PyMuPDF): pages are rasterized at 2× zoom
   in document order and Title/Author come from the PDF metadata, but rendering happens in-browser
   via a vendored [PDF.js](https://mozilla.github.io/pdf.js/) (lazy-loaded, ~1.8 MB). PDF

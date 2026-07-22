@@ -183,6 +183,30 @@ function isFullPagePanel(box, pageW, pageH, threshold = 0.95) {
   return w / Math.max(1, pageW) >= threshold && h / Math.max(1, pageH) >= threshold;
 }
 
+/* ── Device downscaling (--x3 / --x4) ─────────────────────────── */
+
+/* Device screen sizes (portrait width × height), mirroring DEVICE_TARGETS in
+ * convert_manga.py. Used to downscale pages/panels so the device never decodes
+ * more pixels than its screen can show. */
+const MANGA_DEVICE_TARGETS = { x3: [528, 792], x4: [480, 800] };
+
+/* Compute the fitted size for an image of w×h against a device target (a
+ * [tw, th] pair, or null to keep the original). Never upscales, never changes
+ * aspect ratio. The firmware rotates a page/panel whose aspect doesn't match
+ * the screen, so landscape images (w > h) are fitted against the swapped box.
+ * Returns { w, h, resized }. Faithful port of convert_manga.py:fit_to_device's
+ * dimension math (the actual pixel resample happens on a canvas in the UI). */
+function fitToDeviceSize(w, h, target) {
+  if (!target) return { w, h, resized: false };
+  let tw = target[0], th = target[1];
+  if (w > h) { const t = tw; tw = th; th = t; }
+  const scale = Math.min(tw / w, th / h);
+  if (scale >= 1.0) return { w, h, resized: false };  // never upscale
+  const nw = Math.min(tw, Math.max(1, Math.round(w * scale)));
+  const nh = Math.min(th, Math.max(1, Math.round(h * scale)));
+  return { w: nw, h: nh, resized: true };
+}
+
 /* ── Reading-order sort (topological "reads-before" graph) ────── */
 
 function yOverlapFrac(a, b) {
@@ -567,6 +591,7 @@ if (typeof module !== "undefined") {
     naturalSortKey, compareNaturalKeys, naturalSortPaths,
     grayFromRGBA, mergeSmallGaps, detectPanelsGrid, isFullPagePanel,
     floydSteinbergMono, encodeBmp1bit, encodeMonoBmpFromRGBA,
+    MANGA_DEVICE_TARGETS, fitToDeviceSize,
     yOverlapFrac, sortPanelsMangaOrder,
     encodePage, writePanelsIdx, writeMetaBin, writeTocIdx,
     pathDirname, pathNorm, pathJoinNorm,

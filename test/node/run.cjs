@@ -376,6 +376,27 @@ function testDictJmdict() {
 
 /* ── Zip writer round-trip via our own reader ─────────────────── */
 
+function testMangaFit() {
+  console.log("manga device downscaling (vs convert_manga.py fit_to_device):");
+  const X4 = manga.MANGA_DEVICE_TARGETS.x4, X3 = manga.MANGA_DEVICE_TARGETS.x3;
+  const eq = (r, w, h, resized) => r.w === w && r.h === h && r.resized === resized;
+
+  // No target → unchanged.
+  check("no target keeps size", eq(manga.fitToDeviceSize(2000, 3000, null), 2000, 3000, false));
+  // Portrait page downscaled to fit X4 (480×800), aspect preserved.
+  check("portrait → X4", eq(manga.fitToDeviceSize(2000, 3000, X4), 480, 720, true));
+  // Landscape page fits the ROTATED box (the device rotates it to fill the screen).
+  check("landscape → X4 rotated box", eq(manga.fitToDeviceSize(3000, 2000, X4), 720, 480, true));
+  // Never upscale: already within the box.
+  check("no upscale (fits exactly)", eq(manga.fitToDeviceSize(480, 800, X4), 480, 800, false));
+  check("no upscale (smaller)", eq(manga.fitToDeviceSize(400, 800, X4), 400, 800, false));
+  // X3 box.
+  check("portrait → X3", eq(manga.fitToDeviceSize(1056, 1584, X3), 528, 792, true));
+  // Output never exceeds the target box on either axis.
+  const r = manga.fitToDeviceSize(1500, 1000, X4);
+  check("X4 result within rotated box", r.w <= 800 && r.h <= 480 && r.resized);
+}
+
 function testDictPos() {
   console.log("dictionary POS flags (vs convert_jmdict.py pos_flags_*):");
   const V1 = 0x01, V5 = 0x02, VS = 0x04, VK = 0x08, ADJ_I = 0x10, OTHER = 0x20, READING = 0x40;
@@ -441,6 +462,7 @@ async function testZipRoundTrip() {
 (async () => {
   testManga();
   testMangaMono();
+  testMangaFit();
   await testMangaEpub();
   await testMangaYolo();
   await testDictYomitan();
