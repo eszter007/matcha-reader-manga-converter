@@ -178,8 +178,11 @@ function buildEpubTextFiles({ identifier, title, author, language, spine, chapte
   return files;
 }
 
-/* Stable, book-specific identifier (FNV-1a over the metadata) so re-running the
- * converter on the same volume yields the same EPUB id — no Date/random needed. */
+/* Stable, book-specific identifier so re-running the converter on the same
+ * volume yields the same EPUB id — no Date/random needed. Two independent 32-bit
+ * rolling hashes over the metadata (a forward FNV-1a pass and a reverse pass
+ * seeded/mixed with a Murmur-style constant) are concatenated into a 64-bit hex
+ * id, keeping collisions across a library negligible. */
 function epubIdentifier(title, author, count) {
   const str = `${title || ""}|${author || ""}|${count}`;
   let a = 0x811c9dc5, b = 0x1000193;
