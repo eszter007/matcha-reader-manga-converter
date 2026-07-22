@@ -377,6 +377,14 @@ function loadYoloDetector() {
 
 /* ── Conversion pipeline ──────────────────────────────────────── */
 
+/* Clamp a resolution choice to a real MANGA_DEVICE_TARGETS key (own-property
+ * only, so "__proto__" etc. can't slip through) or "" for original. Guards both
+ * the persisted <select> value and the conversion path against junk in
+ * localStorage. */
+function validResChoice(v) {
+  return Object.prototype.hasOwnProperty.call(MANGA_DEVICE_TARGETS, v) ? v : "";
+}
+
 const mangaState = { running: false, cancelled: false };
 
 /* Assemble the collected page/panel images into a fixed-layout EPUB 3 (a zip
@@ -433,8 +441,10 @@ async function runMangaConversion() {
   const epub = $("manga-epub").checked;
   // Target device resolution: "" (original), "x3", or "x4". Downscales pages and
   // panels before detection so the device decodes fewer pixels; never upscales.
-  const resChoice = $("manga-res").value;
-  const deviceTarget = MANGA_DEVICE_TARGETS[resChoice] || null;
+  // Validate against own keys so a stray persisted value (e.g. "__proto__")
+  // can't yield Object.prototype and NaN sizes downstream.
+  const resChoice = validResChoice($("manga-res").value);
+  const deviceTarget = resChoice ? MANGA_DEVICE_TARGETS[resChoice] : null;
   const apiKey = $("manga-key").value.trim();
   const model = $("manga-model").value.trim() || GEMINI_DEFAULT_MODEL;
   if (!noOcr && !apiKey) {
@@ -725,7 +735,7 @@ if (typeof document !== "undefined" && document.getElementById("manga-run")) {
   $("manga-yolo").checked = loadSetting("manga-yolo", "1") === "1";
   $("manga-mono").checked = loadSetting("manga-mono", "0") === "1";
   $("manga-epub").checked = loadSetting("manga-epub", "0") === "1";
-  $("manga-res").value = loadSetting("manga-res", "");
+  $("manga-res").value = validResChoice(loadSetting("manga-res", ""));
   $("manga-run").addEventListener("click", runMangaConversion);
   $("manga-cancel").addEventListener("click", () => { mangaState.cancelled = true; });
   $("manga-file").addEventListener("change", () => {

@@ -197,7 +197,7 @@ const MANGA_DEVICE_TARGETS = { x3: [528, 792], x4: [480, 800] };
  * Returns { w, h, resized }. Faithful port of convert_manga.py:fit_to_device's
  * dimension math (the actual pixel resample happens on a canvas in the UI). */
 function fitToDeviceSize(w, h, target) {
-  if (!target) return { w, h, resized: false };
+  if (!Array.isArray(target) || target.length < 2) return { w, h, resized: false };
   let tw = target[0], th = target[1];
   if (w > h) { const t = tw; tw = th; th = t; }
   const scale = Math.min(tw / w, th / h);
