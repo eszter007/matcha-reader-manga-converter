@@ -49,6 +49,13 @@
         JPEG. The device paints these with a single fast refresh (no 4-level gray pass), so pages and
         panels turn noticeably quicker. Best for pure line art; screentone gradients become dither
         patterns. Pairs naturally with “Skip OCR”.</span></label>
+      <label><input type="checkbox" id="manga-epub"> Also export a portable EPUB
+        <span class="hint">— an extra <code>.epub</code> in the download for other e-readers/apps that
+        don't have Matcha's panel navigation. Each page is followed by its panels as full-screen
+        pages (wide panels rotated to show as large as possible), and the chapter list is kept as the
+        EPUB table of contents. Panels are JPEG and pages keep their JPEG/PNG format — both standard
+        EPUB image types, so the BMP option doesn't affect it. Adds memory and time for big
+        volumes.</span></label>
     </div>
   </div>
 
@@ -118,6 +125,7 @@
 <script src="js/zip.js"></script>
 <script src="js/common.js"></script>
 <script src="js/manga-core.js"></script>
+<script src="js/manga-epub.js"></script>
 <script src="js/yolo.js"></script>
 <script src="js/manga-ui.js"></script>
 </body>

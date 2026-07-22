@@ -9,7 +9,49 @@
 "use strict";
 
 const HEADWORD_SIZE = 32;
-const RECORD_SIZE = 40;   // headword(32) + offset(4) + length(2) + priority(1) + pad(1)
+const RECORD_SIZE = 40;   // headword(32) + offset(4) + length(2) + priority(1) + posFlags(1)
+
+/* Part-of-speech flag bits packed into the record's final byte — must mirror
+ * DictIndexRecord::POS_* in matcha-reader's lib/Dict/DictIndex.h. 0 means "no
+ * POS data" and the firmware then accepts every deinflection candidate, so
+ * leaving flags unset is always safe (fail open). */
+const POS_V1 = 0x01;      // ichidan verb
+const POS_V5 = 0x02;      // godan verb
+const POS_VS = 0x04;      // suru verb
+const POS_VK = 0x08;      // kuru verb
+const POS_ADJ_I = 0x10;   // i-adjective
+const POS_OTHER = 0x20;   // tagged, but none of the above (noun, particle, na-adjective, ...)
+const POS_READING = 0x40; // kana READING record of an entry that has kanji headwords (not a kana lemma)
+const POS_ANY_VERB = POS_V1 | POS_V5 | POS_VS | POS_VK;
+
+/* Map JMdict partOfSpeech tags / Yomitan rules to POS flag bits. Prefix-matches
+ * the verb classes so subtags stay covered (v5k-s, v5aru, v1-s, vs-i, adj-ix); a
+ * verb-ish tag with an unrecognized class fails OPEN (all verb bits) rather than
+ * closed; transitivity tags (vt/vi) say nothing about conjugation and are
+ * ignored. Faithful port of pos_flags_from_tags in convert_jmdict.py. */
+function posFlagsFromTags(tags) {
+  let flags = 0;
+  for (const t of tags) {
+    if (!t) continue;
+    if (t === "vt" || t === "vi" || t === "aux" || t === "aux-adj" || t === "exp") continue;
+    if (t.startsWith("v1")) flags |= POS_V1;
+    else if (t.startsWith("v5") || t.startsWith("v4") || t.startsWith("iv")) flags |= POS_V5;
+    else if (t.startsWith("vs")) flags |= POS_VS;
+    else if (t.startsWith("vk")) flags |= POS_VK;
+    else if (t.startsWith("adj-i")) flags |= POS_ADJ_I;
+    else if (t.startsWith("v") || t === "aux-v") flags |= POS_ANY_VERB;
+    else flags |= POS_OTHER;
+  }
+  return flags;
+}
+
+function posFlagsJmdict(entry) {
+  const tags = [];
+  for (const sense of entry.sense || []) {
+    for (const p of sense.partOfSpeech || []) tags.push(p);
+  }
+  return posFlagsFromTags(tags);
+}
 
 const SPX_STRIDE = 48;
 const SPX_VERSION = 1;
@@ -19,8 +61,9 @@ const dictEncoder = new TextEncoder();
 
 /* ── Shared output writer ─────────────────────────────────────── */
 
-/* records: array of {hw: Uint8Array, def: Uint8Array, priority: int}.
- * Returns {idx: Uint8Array, dat: Uint8Array}. */
+/* records: array of {hw: Uint8Array, def: Uint8Array, priority: int,
+ * posFlags?: int}. posFlags defaults to 0 (fail-open / no POS data), matching
+ * the MDict path and any pre-flags caller. Returns {idx, dat}. */
 function dictWriteBinary(records) {
   // Stable sort by headword bytes (Python: records.sort(key=lambda r: r[0])).
   records = records.map((r, i) => ({ r, i }));
@@ -55,7 +98,7 @@ function dictWriteBinary(records) {
       prevOffset = offset;
       prevLength = length;
     }
-    entries.push({ hw: rec.hw, offset, length, priority: rec.priority });
+    entries.push({ hw: rec.hw, offset, length, priority: rec.priority, posFlags: rec.posFlags || 0 });
   }
 
   for (const e of entries) {
@@ -64,7 +107,7 @@ function dictWriteBinary(records) {
     idx.u32(e.offset);
     idx.u16(e.length);
     idx.u8(e.priority);
-    idx.u8(0);
+    idx.u8(e.posFlags & 0xff);
   }
 
   return { idx: idx.toUint8Array(), dat: dat.toUint8Array(), recordCount: entries.length };
@@ -134,6 +177,7 @@ function convertJmdictRecords(data, onProgress) {
     const definition = formatDefinitionJmdict(entry);
     const defBytes = dictEncoder.encode(definition);
     const priority = computePriorityJmdict(entry);
+    const posFlags = posFlagsJmdict(entry);
 
     const seen = new Set();
     for (const kanji of entry.kanji || []) {
@@ -141,14 +185,19 @@ function convertJmdictRecords(data, onProgress) {
       const key = kanji.text;
       if (hwBytes.length >= HEADWORD_SIZE || seen.has(key)) continue;
       seen.add(key);
-      records.push({ hw: hwBytes, def: defBytes, priority });
+      records.push({ hw: hwBytes, def: defBytes, priority, posFlags });
     }
+    // Kana records of an entry that also has kanji headwords are READING records:
+    // text matching them is usually conjugation morphology, not the word itself.
+    // Kana-only lemmas (no kanji form) stay unflagged. Empty kanji list is
+    // falsy in Python, so guard on length to match (POS_READING only when set).
+    const kanaFlags = posFlags | (entry.kanji && entry.kanji.length ? POS_READING : 0);
     for (const kana of entry.kana || []) {
       const hwBytes = dictEncoder.encode(kana.text);
       const key = kana.text;
       if (hwBytes.length >= HEADWORD_SIZE || seen.has(key)) continue;
       seen.add(key);
-      records.push({ hw: hwBytes, def: defBytes, priority });
+      records.push({ hw: hwBytes, def: defBytes, priority, posFlags: kanaFlags });
     }
     if (onProgress && wi % 20000 === 0) onProgress(wi, words.length);
   }
@@ -304,10 +353,11 @@ function convertYomitanRecords(termBanks, onProgress) {
       const headword = entry[0];
       if (!headword || typeof headword !== "string") continue;
       const reading = entry.length > 1 ? entry[1] : "";
+      const rules = (entry.length > 3 && typeof entry[3] === "string") ? entry[3] : "";
       const score = entry.length > 4 ? entry[4] : 0;
       const definitions = entry.length > 5 ? entry[5] : [];
       const redirect = findRedirectTarget(definitions);
-      allEntries.push([headword, reading, score, definitions, redirect]);
+      allEntries.push([headword, reading, score, definitions, redirect, rules]);
       if (!redirect) {
         const definition = formatDefinitionYomitan(headword, reading, definitions);
         if (definition) {
@@ -325,7 +375,7 @@ function convertYomitanRecords(termBanks, onProgress) {
   const records = [];
   let entryCount = 0;
   for (let ei = 0; ei < allEntries.length; ei++) {
-    const [headword, reading, score, definitions, redirect] = allEntries[ei];
+    const [headword, reading, score, definitions, redirect, rules] = allEntries[ei];
     let definition, priority;
     if (redirect) {
       const target = canonicalDefs.get(redirect);
@@ -339,11 +389,14 @@ function convertYomitanRecords(termBanks, onProgress) {
     }
 
     const defBytes = dictEncoder.encode(definition);
+    // Yomitan spec: empty rules = "word is not inflected" — that IS positive POS
+    // data (a non-conjugating word), so stamp POS_OTHER rather than fail-open 0.
+    const posFlags = rules.trim() ? posFlagsFromTags(rules.trim().split(/\s+/)) : POS_OTHER;
     const seen = new Set();
     const hwBytes = dictEncoder.encode(headword);
     if (hwBytes.length < HEADWORD_SIZE) {
       seen.add(headword);
-      records.push({ hw: hwBytes, def: defBytes, priority });
+      records.push({ hw: hwBytes, def: defBytes, priority, posFlags });
     }
 
     if (reading && reading !== headword && !redirect) {
@@ -351,7 +404,8 @@ function convertYomitanRecords(termBanks, onProgress) {
       if (rBytes.length < HEADWORD_SIZE && !seen.has(reading)) {
         const rDef = formatDefinitionYomitan(reading, reading, definitions);
         if (rDef) {
-          records.push({ hw: rBytes, def: dictEncoder.encode(rDef), priority });
+          // reading != headword: kana reading of a kanji headword → flag it.
+          records.push({ hw: rBytes, def: dictEncoder.encode(rDef), priority, posFlags: posFlags | POS_READING });
         }
       }
     }
@@ -367,5 +421,6 @@ if (typeof module !== "undefined") {
     convertJmdictRecords, convertYomitanRecords,
     formatDefinitionJmdict, formatDefinitionYomitan,
     flattenStructuredContent, findRedirectTarget,
+    posFlagsFromTags, posFlagsJmdict,
   };
 }

@@ -59,6 +59,16 @@ async function canvasToPngBytes(canvas) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+/* Rotate a canvas 90° clockwise into a new (height×width) canvas. */
+function rotateCanvas90CW(src) {
+  const dst = makeCanvas(src.height, src.width);
+  const c = dst.getContext("2d");
+  c.translate(src.height, 0);
+  c.rotate(Math.PI / 2);
+  c.drawImage(src, 0, 0);
+  return dst;
+}
+
 function bytesToBase64(bytes) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -369,6 +379,47 @@ function loadYoloDetector() {
 
 const mangaState = { running: false, cancelled: false };
 
+/* Assemble the collected page/panel images into a fixed-layout EPUB 3 (a zip
+ * with the mandatory STORE-first mimetype). epubPages is [{pageIdx, images:
+ * [{bytes, mime, w, h}]}] in reading order; the pure XML lives in manga-epub.js.
+ * tocEntries ([[pageIndex, title]]) is carried into the EPUB's table of
+ * contents, each chapter resolved to that page's first spine page. */
+async function buildMangaEpub({ title, author, epubPages, tocEntries }) {
+  const spine = [];
+  const pageFirstHref = new Map();  // pageIdx → xhtmlHref of that page's first image
+  for (const pg of epubPages) {
+    pg.images.forEach((im, ii) => {
+      const base = `p${String(pg.pageIdx).padStart(4, "0")}_${ii}`;
+      const xhtmlHref = `text/${base}.xhtml`;
+      if (ii === 0) pageFirstHref.set(pg.pageIdx, xhtmlHref);
+      spine.push({
+        xhtmlId: `x_${base}`, xhtmlHref,
+        imgId: `img_${base}`, imgHref: `images/${base}.${epubImageExt(im.mime)}`,
+        mime: im.mime, w: im.w, h: im.h,
+        isCover: spine.length === 0,
+        bytes: im.bytes,
+      });
+    });
+  }
+
+  let chapters = tocEntries
+    .slice()
+    .sort((a, b) => a[0] - b[0])
+    .map(([pageIndex, chTitle]) => ({ href: pageFirstHref.get(pageIndex), title: chTitle }))
+    .filter((c) => c.href);
+  if (!chapters.length && spine.length) chapters = [{ href: spine[0].xhtmlHref, title: title || "Start" }];
+
+  const identifier = epubIdentifier(title, author, spine.length);
+  const files = buildEpubTextFiles({ identifier, title, author, language: "ja", spine, chapters });
+
+  const zw = new ZipWriter();
+  const enc = new TextEncoder();
+  zw.addFile("mimetype", enc.encode(EPUB_MIMETYPE));  // must be first + STORE (OCF)
+  for (const f of files) zw.addFile(f.path, enc.encode(f.text));
+  for (const s of spine) zw.addFile("OEBPS/" + s.imgHref, s.bytes);
+  return new Uint8Array(await zw.toBlob().arrayBuffer());
+}
+
 async function runMangaConversion() {
   const fileInput = $("manga-file");
   const files = fileInput.files;
@@ -379,6 +430,7 @@ async function runMangaConversion() {
 
   const noOcr = $("manga-no-ocr").checked;
   const mono = $("manga-mono").checked;
+  const epub = $("manga-epub").checked;
   const apiKey = $("manga-key").value.trim();
   const model = $("manga-model").value.trim() || GEMINI_DEFAULT_MODEL;
   if (!noOcr && !apiKey) {
@@ -389,6 +441,7 @@ async function runMangaConversion() {
   saveSetting("gemini-model", model);
   saveSetting("manga-yolo", $("manga-yolo").checked ? "1" : "0");
   saveSetting("manga-mono", mono ? "1" : "0");
+  saveSetting("manga-epub", epub ? "1" : "0");
 
   const panelMargin = parseInt($("manga-margin").value, 10);
   const margin = Number.isInteger(panelMargin) ? panelMargin : 10;
@@ -446,6 +499,10 @@ async function runMangaConversion() {
     let totalPanels = 0;
     let totalTextBlocks = 0;
     let pagesDone = 0;
+    // For the optional portable EPUB: one entry per manga page, each holding the
+    // full-page image followed by its (rotated) panel images. Assembled after
+    // the loop; null when the EPUB export is off.
+    const epubPages = epub ? [] : null;
 
     for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
       if (mangaState.cancelled) {
@@ -477,6 +534,18 @@ async function runMangaConversion() {
         zip.addFile(`${folder}/${pageBase}${ext}`, srcBytes);
       } else {
         zip.addFile(`${folder}/${pageBase}.jpg`, await canvasToJpegBytes(canvas, 0.92));
+      }
+
+      // The EPUB always uses a widely-supported core media type (JPEG/PNG); the
+      // full page is never rotated (it's the overview). Reuse the source bytes
+      // when they're already JPEG/PNG, otherwise re-encode from the canvas.
+      const epubImages = [];
+      if (epub) {
+        let pageBytes, pageMime;
+        if (ext === ".jpg" || ext === ".jpeg") { pageBytes = srcBytes; pageMime = "image/jpeg"; }
+        else if (ext === ".png") { pageBytes = srcBytes; pageMime = "image/png"; }
+        else { pageBytes = await canvasToJpegBytes(canvas, 0.92); pageMime = "image/jpeg"; }
+        epubImages.push({ bytes: pageBytes, mime: pageMime, w: imgW, h: imgH });
       }
 
       let boxes = null;
@@ -519,11 +588,21 @@ async function runMangaConversion() {
             cropBytes = await canvasToJpegBytes(cropCanvas, 0.90);
             zip.addFile(`${folder}/p${pageIdx}_${panelIdx}.jpg`, cropBytes);
           }
+          if (epub) {
+            // Rotate wide (landscape) panels to portrait so they display as
+            // large as possible on the usual portrait reading screen; the
+            // fixed-layout reader then scales each to fullscreen.
+            let panelCanvas = cropCanvas, pw = cw, ph = ch;
+            if (cw > ch) { panelCanvas = rotateCanvas90CW(cropCanvas); pw = ch; ph = cw; }
+            epubImages.push({ bytes: await canvasToJpegBytes(panelCanvas, 0.90), mime: "image/jpeg", w: pw, h: ph });
+          }
         }
         panelCrops.push(cropBytes);
         panelRects.push([mx1, my1, mx2, my2]);
       }
       bitmap.close();
+
+      if (epub) epubPages.push({ pageIdx, images: epubImages });
 
       let ocrResults;
       if (!noOcr) {
@@ -583,12 +662,22 @@ async function runMangaConversion() {
     if (metaBin) zip.addFile(`${folder}/meta.bin`, metaBin);
     if (tocEntries.length) zip.addFile(`${folder}/toc.idx`, writeTocIdx(tocEntries));
 
+    // Optional portable EPUB alongside the native panel folder.
+    if (epub && epubPages.length) {
+      setProgress(pagesDone, pages.length, "Building EPUB…");
+      const epubBytes = await buildMangaEpub({ title: metaTitle, author: metaAuthor, epubPages, tocEntries });
+      zip.addFile(`${folder}.epub`, epubBytes);
+      logLine(`Built ${folder}.epub (${epubPages.reduce((n, p) => n + p.images.length, 0)} images) — a portable copy for other readers.`);
+    }
+
     setProgress(pagesDone, pages.length, "Packaging…");
     const blob = zip.toBlob();
     logLine(`Done: ${pagesDone} pages, ${totalPanels} panels` +
       (noOcr ? "" : `, ${totalTextBlocks} text blocks`) +
-      (mono ? ", 1-bit dithered BMP" : "") + ` — ${formatBytes(blob.size)}`);
-    logLine(`Unzip onto the SD card (e.g. /manga/) or upload the "${folder}" folder via the device's web file transfer.`);
+      (mono ? ", 1-bit dithered BMP" : "") +
+      (epub ? ", + portable EPUB" : "") + ` — ${formatBytes(blob.size)}`);
+    logLine(`Unzip onto the SD card (e.g. /manga/) or upload the "${folder}" folder via the device's web file transfer.` +
+      (epub ? ` The "${folder}.epub" inside the zip is a standalone copy for other e-readers/apps.` : ""));
     downloadBlob(blob, `${folder}.zip`);
     setProgress(pagesDone, pagesDone, "Complete");
   } catch (e) {
@@ -610,6 +699,7 @@ if (typeof document !== "undefined" && document.getElementById("manga-run")) {
   $("manga-model").value = loadSetting("gemini-model", GEMINI_DEFAULT_MODEL);
   $("manga-yolo").checked = loadSetting("manga-yolo", "1") === "1";
   $("manga-mono").checked = loadSetting("manga-mono", "0") === "1";
+  $("manga-epub").checked = loadSetting("manga-epub", "0") === "1";
   $("manga-run").addEventListener("click", runMangaConversion);
   $("manga-cancel").addEventListener("click", () => { mangaState.cancelled = true; });
   $("manga-file").addEventListener("change", () => {

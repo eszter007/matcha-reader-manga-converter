@@ -17,6 +17,7 @@ global.bytesEqual = binary.bytesEqual;
 const zip = require("../../js/zip.js");
 const dict = require("../../js/dict.js");
 const manga = require("../../js/manga-core.js");
+const epub = require("../../js/manga-epub.js");
 
 let failures = 0;
 
@@ -166,6 +167,105 @@ function testMangaMono() {
   check("encodeMonoBmpFromRGBA matches manual path", binary.bytesEqual(viaRgba, viaGray));
 }
 
+/* ── Manga: portable EPUB export ──────────────────────────────── */
+
+/* Build a small EPUB the way manga-ui.js does (mimetype first + STORE), then
+ * read it back with our own ZipReader and check the structure. */
+async function testMangaEpub() {
+  console.log("manga EPUB export:");
+
+  // Two pages: page 0 = full page + a wide panel (rotated → portrait) + a tall
+  // panel; page 1 = full page only. Chapter list points at both pages.
+  const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]); // stand-in image bytes
+  const epubPages = [
+    { pageIdx: 0, images: [
+      { bytes: jpg, mime: "image/jpeg", w: 800, h: 1200 }, // full page
+      { bytes: jpg, mime: "image/jpeg", w: 500, h: 900 },  // wide panel, already rotated to portrait by the UI (w/h swapped)
+      { bytes: jpg, mime: "image/jpeg", w: 400, h: 700 },  // tall panel
+    ] },
+    { pageIdx: 1, images: [{ bytes: jpg, mime: "image/jpeg", w: 800, h: 1200 }] },
+  ];
+  const totalImages = epubPages.reduce((n, p) => n + p.images.length, 0); // 4
+  const tocEntries = [[1, "Chapter 2"], [0, "Chapter 1"]]; // deliberately unsorted
+
+  // Mirror manga-ui.js buildMangaEpub assembly (kept in the test so the pure
+  // module can be exercised without a browser).
+  const spine = [];
+  const pageFirstHref = new Map();
+  for (const pg of epubPages) {
+    pg.images.forEach((im, ii) => {
+      const base = `p${String(pg.pageIdx).padStart(4, "0")}_${ii}`;
+      const xhtmlHref = `text/${base}.xhtml`;
+      if (ii === 0) pageFirstHref.set(pg.pageIdx, xhtmlHref);
+      spine.push({
+        xhtmlId: `x_${base}`, xhtmlHref,
+        imgId: `img_${base}`, imgHref: `images/${base}.${epub.epubImageExt(im.mime)}`,
+        mime: im.mime, w: im.w, h: im.h, isCover: spine.length === 0, bytes: im.bytes,
+      });
+    });
+  }
+  const chapters = tocEntries.slice().sort((a, b) => a[0] - b[0])
+    .map(([pi, t]) => ({ href: pageFirstHref.get(pi), title: t })).filter((c) => c.href);
+  const identifier = epub.epubIdentifier("Test Manga", "Test Author", spine.length);
+  const files = epub.buildEpubTextFiles({ identifier, title: "Test Manga", author: "Test Author", language: "ja", spine, chapters });
+
+  const zw = new zip.ZipWriter();
+  const enc = new TextEncoder();
+  zw.addFile("mimetype", enc.encode(epub.EPUB_MIMETYPE));
+  for (const f of files) zw.addFile(f.path, enc.encode(f.text));
+  for (const s of spine) zw.addFile("OEBPS/" + s.imgHref, s.bytes);
+  const bytes = new Uint8Array(await zw.toBlob().arrayBuffer());
+
+  // OCF requires the mimetype file first, STORE-compressed, with an 8-byte name
+  // and NO extra field — which is exactly what puts its name at byte 30 and its
+  // content at byte 38, the fixed offsets readers use to sniff an EPUB without
+  // unzipping. Assert those local-header fields explicitly (rather than trusting
+  // the offsets blind) so 30/38 is self-documenting and a stray extra field or
+  // rename is caught as the OCF violation it is, not a silent pass.
+  const lh = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  check("first local header signature", lh.getUint32(0, true) === 0x04034b50);
+  check("mimetype entry is STORE", lh.getUint16(8, true) === 0);
+  check("mimetype name len 8, no extra field", lh.getUint16(26, true) === 8 && lh.getUint16(28, true) === 0);
+  // Given those fields, the name lives at 30 and content at 30 + nameLen (= 38).
+  const nameOff = 30, contentOff = 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  check("mimetype name at offset 30", new TextDecoder().decode(bytes.subarray(nameOff, nameOff + 8)) === "mimetype");
+  check("epub mimetype content at offset 38",
+    contentOff === 38 && new TextDecoder().decode(bytes.subarray(contentOff, contentOff + epub.EPUB_MIMETYPE.length)) === epub.EPUB_MIMETYPE);
+
+  const zr = new zip.ZipReader(bytes);
+  check("mimetype is the first entry, STORE", zr.entries[0].name === "mimetype" && zr.entries[0].method === 0);
+
+  const dec = new TextDecoder();
+  const container = dec.decode(await zr.readEntryByName("META-INF/container.xml"));
+  check("container points at content.opf", container.includes(`full-path="OEBPS/content.opf"`));
+
+  const opf = dec.decode(await zr.readEntryByName("OEBPS/content.opf"));
+  check("opf fixed-layout", opf.includes("pre-paginated"));
+  check("opf right-to-left spine", opf.includes(`page-progression-direction="rtl"`));
+  check("opf cover-image on first image", opf.includes(`id="img_p0000_0"`) && /id="img_p0000_0"[^>]*properties="cover-image"/.test(opf));
+  check("opf itemref count == images", (opf.match(/<itemref\b/g) || []).length === totalImages, `${(opf.match(/<itemref\b/g) || []).length} != ${totalImages}`);
+  check("opf image items == images", (opf.match(/media-type="image\/jpeg"/g) || []).length === totalImages);
+
+  const nav = dec.decode(await zr.readEntryByName("OEBPS/nav.xhtml"));
+  check("nav lists both chapters in page order",
+    nav.indexOf("Chapter 1") >= 0 && nav.indexOf("Chapter 1") < nav.indexOf("Chapter 2"));
+  check("nav links resolve to page xhtml", nav.includes(`href="text/p0000_0.xhtml"`) && nav.includes(`href="text/p0001_0.xhtml"`));
+
+  const ncx = dec.decode(await zr.readEntryByName("OEBPS/toc.ncx"));
+  check("ncx has both navPoints", (ncx.match(/<navPoint\b/g) || []).length === 2);
+
+  // Every spine page renders one image at its declared viewport size.
+  const wide = dec.decode(await zr.readEntryByName("OEBPS/text/p0000_1.xhtml"));
+  check("page viewport matches image dims", wide.includes(`content="width=500, height=900"`));
+  check("page references its image one dir up", wide.includes(`src="../images/p0000_1.jpg"`));
+  check("all page xhtml present", files.filter((f) => f.path.startsWith("OEBPS/text/")).length === totalImages);
+
+  // Identifier is deterministic and content-derived.
+  check("identifier deterministic",
+    epub.epubIdentifier("Test Manga", "Test Author", spine.length) === identifier && /^urn:matcha-reader:[0-9a-f]{16}$/.test(identifier));
+  check("identifier varies with title", epub.epubIdentifier("Other", "Test Author", spine.length) !== identifier);
+}
+
 /* ── Manga: YOLO panel detection vs Python reference ──────────── */
 
 async function testMangaYolo() {
@@ -276,6 +376,50 @@ function testDictJmdict() {
 
 /* ── Zip writer round-trip via our own reader ─────────────────── */
 
+function testDictPos() {
+  console.log("dictionary POS flags (vs convert_jmdict.py pos_flags_*):");
+  const V1 = 0x01, V5 = 0x02, VS = 0x04, VK = 0x08, ADJ_I = 0x10, OTHER = 0x20, READING = 0x40;
+  const ANY_VERB = V1 | V5 | VS | VK;
+
+  // pos_flags_from_tags: verb classes prefix-match; vt/vi/aux/exp ignored;
+  // unknown verb subtype fails open; everything else → OTHER.
+  const cases = [
+    [["v1"], V1], [["v1-s"], V1],
+    [["v5k-s"], V5], [["v5aru"], V5], [["v4r"], V5], [["iv"], V5],
+    [["vs-i"], VS], [["vs"], VS],
+    [["vk"], VK],
+    [["adj-i"], ADJ_I], [["adj-ix"], ADJ_I],
+    [["vt", "vi", "aux", "aux-adj", "exp"], 0], // all ignored → no flags
+    [["n"], OTHER], [["adj-na"], OTHER],
+    [["v-unspec"], ANY_VERB], [["aux-v"], ANY_VERB], // unknown verb / aux-v fail open
+    [["v1", "n"], V1 | OTHER],
+    [[""], 0], [[], 0],
+  ];
+  for (const [tags, want] of cases) {
+    const got = dict.posFlagsFromTags(tags);
+    check(`posFlagsFromTags(${JSON.stringify(tags)})=0x${want.toString(16)}`, got === want, `got 0x${got.toString(16)}`);
+  }
+
+  // pos_flags_jmdict aggregates partOfSpeech across all senses.
+  check("posFlagsJmdict aggregates senses",
+    dict.posFlagsJmdict({ sense: [{ partOfSpeech: ["v5r"] }, { partOfSpeech: ["n"] }] }) === (V5 | OTHER));
+
+  // POS_READING: kana record of a kanji entry is flagged; a kana-only lemma is not.
+  const data = { words: [
+    { kanji: [{ text: "食べる" }], kana: [{ text: "たべる" }], sense: [{ partOfSpeech: ["v1"] }] },
+    { kanji: [], kana: [{ text: "ちょっと" }], sense: [{ partOfSpeech: ["adv"] }] },
+  ] };
+  const idx = dict.dictWriteBinary(dict.convertJmdictRecords(data)).idx;
+  const posByName = {};
+  for (let i = 0; i < idx.length / 40; i++) {
+    const name = new TextDecoder().decode(idx.subarray(i * 40, i * 40 + 32)).replace(/\0+$/, "");
+    posByName[name] = idx[i * 40 + 39];
+  }
+  check("kanji headword → V1, no READING", posByName["食べる"] === V1);
+  check("kana reading of kanji entry → V1|READING", posByName["たべる"] === (V1 | READING));
+  check("kana-only lemma → OTHER, no READING", posByName["ちょっと"] === OTHER);
+}
+
 async function testZipRoundTrip() {
   console.log("zip writer round-trip:");
   const zw = new zip.ZipWriter();
@@ -297,10 +441,12 @@ async function testZipRoundTrip() {
 (async () => {
   testManga();
   testMangaMono();
+  await testMangaEpub();
   await testMangaYolo();
   await testDictYomitan();
   testDictJmdict();
   await testDictMdx();
+  testDictPos();
   await testZipRoundTrip();
   if (failures) {
     console.error(`\n${failures} failure(s)`);

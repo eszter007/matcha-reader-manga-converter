@@ -10,7 +10,7 @@ for OCR.
 
 | Tool | Input | Output |
 |---|---|---|
-| 📖 **Manga Converter** | CBZ / ZIP / EPUB / page images | Manga folder: renamed pages, panel crops, `panels.idx`/`panels.dat` (with OCR text + English translations), `meta.bin`, `toc.idx` |
+| 📖 **Manga Converter** | CBZ / ZIP / EPUB / PDF / page images | Manga folder: renamed pages, panel crops, `panels.idx`/`panels.dat` (with OCR text + English translations), `meta.bin`, `toc.idx` — plus an optional portable `.epub` for other readers |
 | 📚 **Dictionary Converter** | Yomitan `.zip` (Jitendex, JMnedict, grammar) or jmdict-simplified `.json`/`.json.tgz` | `dict/<name>.idx` + `.dat` + `.spx` lookup accelerator |
 | 🔤 **Font Converter** | TTF / OTF (up to 4 styles + fallback font) | `.fonts/<Family>/<Family>_<size>.cpfont` (v4, with kerning + ligatures) |
 
@@ -46,6 +46,13 @@ These are ports of the firmware's conversion scripts, not reimplementations from
   single fast refresh (no 4-level gray pass), so pages and panels turn noticeably quicker; it's
   best for pure line art (screentone gradients become dither patterns) and pairs naturally with
   *Skip OCR*.
+  Tick *Also export a portable EPUB* to drop an extra `.epub` into the download for other
+  e-readers/apps that don't have Matcha's panel navigation. It's a fixed-layout EPUB 3 (one image
+  per screen, right-to-left): each manga page is followed by its panels as full-screen pages, wide
+  panels rotated to portrait so they display as large as possible, and the source chapter list is
+  carried over as the EPUB table of contents. Panel images are JPEG and pages keep their original
+  JPEG/PNG — both core EPUB media types, so the 1-bit BMP option doesn't affect the EPUB. This is
+  Matcha-tools-only — the desktop Python tool has no EPUB export.
   PDF input works like the desktop tool's (which uses PyMuPDF): pages are rasterized at 2× zoom
   in document order and Title/Author come from the PDF metadata, but rendering happens in-browser
   via a vendored [PDF.js](https://mozilla.github.io/pdf.js/) (lazy-loaded, ~1.8 MB). PDF
