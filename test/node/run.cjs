@@ -216,10 +216,21 @@ async function testMangaEpub() {
   for (const s of spine) zw.addFile("OEBPS/" + s.imgHref, s.bytes);
   const bytes = new Uint8Array(await zw.toBlob().arrayBuffer());
 
-  // OCF magic: "mimetype" at byte 30, its STORE content at byte 38.
-  check("mimetype at offset 30", new TextDecoder().decode(bytes.subarray(30, 38)) === "mimetype");
+  // OCF requires the mimetype file first, STORE-compressed, with an 8-byte name
+  // and NO extra field — which is exactly what puts its name at byte 30 and its
+  // content at byte 38, the fixed offsets readers use to sniff an EPUB without
+  // unzipping. Assert those local-header fields explicitly (rather than trusting
+  // the offsets blind) so 30/38 is self-documenting and a stray extra field or
+  // rename is caught as the OCF violation it is, not a silent pass.
+  const lh = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  check("first local header signature", lh.getUint32(0, true) === 0x04034b50);
+  check("mimetype entry is STORE", lh.getUint16(8, true) === 0);
+  check("mimetype name len 8, no extra field", lh.getUint16(26, true) === 8 && lh.getUint16(28, true) === 0);
+  // Given those fields, the name lives at 30 and content at 30 + nameLen (= 38).
+  const nameOff = 30, contentOff = 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  check("mimetype name at offset 30", new TextDecoder().decode(bytes.subarray(nameOff, nameOff + 8)) === "mimetype");
   check("epub mimetype content at offset 38",
-    new TextDecoder().decode(bytes.subarray(38, 38 + epub.EPUB_MIMETYPE.length)) === epub.EPUB_MIMETYPE);
+    contentOff === 38 && new TextDecoder().decode(bytes.subarray(contentOff, contentOff + epub.EPUB_MIMETYPE.length)) === epub.EPUB_MIMETYPE);
 
   const zr = new zip.ZipReader(bytes);
   check("mimetype is the first entry, STORE", zr.entries[0].name === "mimetype" && zr.entries[0].method === 0);
